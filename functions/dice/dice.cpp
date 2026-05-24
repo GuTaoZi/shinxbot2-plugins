@@ -15,7 +15,6 @@ static std::string remove_all_spaces(const std::string& s) {
 
 void dice::process(std::string message, const msg_meta &conf) {
     message = trim(message);
-    message = remove_all_spaces(message);
 
     try {
         if (!message.empty() && message[0] == '.') {
@@ -51,7 +50,7 @@ void dice::process(std::string message, const msg_meta &conf) {
 }
 
 bool dice::check(std::string message, const msg_meta &conf) {
-    return message.find('d') != message.npos || message.find('D') != message.npos;
+    return message.find('d') != message.npos || message.find('D') != message.npos || (message.size() > 1 && message[0] == '.');
 }
 
 std::string dice::help() {

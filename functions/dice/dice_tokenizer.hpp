@@ -35,7 +35,7 @@ namespace dice_tokenizer {
     
     enum class OpType {
         NUMBER,
-        ADD, SUB, MUL, DIV, POW,
+        ADD, SUB, NEG, MUL, DIV, POW,
         D_UNARY,
         D_BINARY
     };
@@ -61,6 +61,7 @@ namespace dice_tokenizer {
         switch (op) {
             case OpType::ADD:
             case OpType::SUB:
+            case OpType::NEG:
                 return 1;
             case OpType::MUL:
             case OpType::DIV:
@@ -75,26 +76,29 @@ namespace dice_tokenizer {
         }
     }
 
-    // template<typename T>
-    // inline std::string opToString(const OpType &op, const T val) {
-    //     switch (op) {
-    //         case OpType::NUMBER: return myToString(val);
-    //         case OpType::ADD: return "ADD";
-    //         case OpType::SUB: return "SUB";
-    //         case OpType::MUL: return "MUL";
-    //         case OpType::DIV: return "DIV";
-    //         case OpType::POW: return "POW";
-    //         case OpType::D_UNARY: return "D_UNARY";
-    //         case OpType::D_BINARY: return "D_BINARY";
-    //     }
-    //     return "UNKNOWN";
-    // }
+    template<typename T>
+    inline std::string opToStringName(const OpType &op, const T val) {
+        switch (op) {
+            case OpType::NUMBER: return myToString(val);
+            case OpType::ADD: return "ADD";
+            case OpType::SUB: return "SUB";
+            case OpType::NEG: return "NEG";
+            case OpType::MUL: return "MUL";
+            case OpType::DIV: return "DIV";
+            case OpType::POW: return "POW";
+            case OpType::D_UNARY: return "D_UNARY";
+            case OpType::D_BINARY: return "D_BINARY";
+        }
+        return "UNKNOWN";
+    }
+
     template<typename T>
     inline std::string opToString(const OpType &op, const T val) {
         switch (op) {
             case OpType::NUMBER: return myToString(val);
             case OpType::ADD: return "+";
             case OpType::SUB: return "-";
+            case OpType::NEG: return "-";
             case OpType::MUL: return "*";
             case OpType::DIV: return "/";
             case OpType::POW: return "^";
@@ -123,6 +127,9 @@ namespace dice_tokenizer {
 
                 case OpType::D_UNARY:
                     return fmt::format("d{}", right->output());
+
+                case OpType::NEG:
+                    return fmt::format("-{}", right->output());
 
                 default:
                     std::string leftStr = left ? left->output() : "";
@@ -179,10 +186,10 @@ namespace dice_tokenizer {
             std::string leftStr = left ? left->renderedStr : "";
             std::string rightStr = right ? right->renderedStr : "";
             if (getPreority(op) > 1) {
-                if (left && left->op != OpType::NUMBER && getPreority(left->op) < getPreority(op)) {
+                if (left && (left->op != OpType::NUMBER && getPreority(left->op) < getPreority(op) || getPreority(left->op) == getPreority(OpType::D_BINARY))) {
                     leftStr = "(" + leftStr + ")";
                 }
-                if (right && right->op != OpType::NUMBER && getPreority(right->op) < getPreority(op)) {
+                if (right && (right->op != OpType::NUMBER && getPreority(right->op) < getPreority(op) || getPreority(right->op) == getPreority(OpType::D_BINARY))) {
                     rightStr = "(" + rightStr + ")";
                 }
             }
@@ -195,6 +202,7 @@ namespace dice_tokenizer {
                 switch (op) {
                     case OpType::ADD: calcVal = leftVal + rightVal; break;
                     case OpType::SUB: calcVal = leftVal - rightVal; break;
+                    case OpType::NEG: calcVal = -rightVal; break;
                     case OpType::MUL: calcVal = leftVal * rightVal; break;
                     case OpType::DIV: calcVal = rightVal != 0 ? leftVal / rightVal : 0; break;
                     case OpType::POW: calcVal = pow(leftVal, rightVal); break;
@@ -224,7 +232,7 @@ namespace dice_tokenizer {
             if (op == OpType::D_UNARY) {
                 if (right->op != OpType::NUMBER) {
                     bool ret = right->doDice();
-                    if (right && right->op != OpType::NUMBER && getPreority(right->op) < getPreority(op)) {
+                    if (right && (right->op != OpType::NUMBER && getPreority(right->op) < getPreority(op) || getPreority(right->op) == getPreority(OpType::D_BINARY))) {
                         renderedStr = "d(" + right->renderedStr + ")";
                     } else {
                         renderedStr = "d" + right->renderedStr;
@@ -251,10 +259,10 @@ namespace dice_tokenizer {
                     bool ret2 = right->doDice();
                     std::string leftStr = left ? left->renderedStr : "";
                     std::string rightStr = right ? right->renderedStr : "";
-                    if (left && left->op != OpType::NUMBER && getPreority(left->op) < getPreority(op)) {
+                    if (left && (left->op != OpType::NUMBER && getPreority(left->op) < getPreority(op) || getPreority(left->op) == getPreority(OpType::D_BINARY))) {
                         leftStr = "(" + leftStr + ")";
                     }
-                    if (right && right->op != OpType::NUMBER && getPreority(right->op) < getPreority(op)) {
+                    if (right && (right->op != OpType::NUMBER && getPreority(right->op) < getPreority(op) || getPreority(right->op) == getPreority(OpType::D_BINARY))) {
                         rightStr = "(" + rightStr + ")";
                     }
                     renderedStr = fmt::format("{}d{}", leftStr, rightStr);
@@ -266,12 +274,16 @@ namespace dice_tokenizer {
 
                 double rval = 0;
                 if (num >= 100) {
-                    double mean = num * (sides + 1.0) / 2.0;
-                    double stddev = sqrt(num * (1ll * sides * sides - 1) / 12.0);
-                    std::normal_distribution<double> dist(mean, stddev);
-                    rval = std::round(dist(drng()));
-                    if (rval < num) rval = num;
-                    if (rval > 1ll * num * sides) rval = 1ll * num * sides;
+                    if (sides <= 1) {
+                        rval = num;
+                    } else {
+                        double mean = num * (sides + 1.0) / 2.0;
+                        double stddev = sqrt(num * (1ll * sides * sides - 1) / 12.0);
+                        std::normal_distribution<double> dist(mean, stddev);
+                        rval = std::round(dist(drng()));
+                        if (rval < num) rval = num;
+                        if (rval > 1ll * num * sides) rval = 1ll * num * sides;
+                    }
                     renderedStr = fmt::format("({}d{}={})", num, sides, rval);
                 } else if (num >= 20) {
                     for (int i = 0; i < num; ++i) {
@@ -383,8 +395,8 @@ namespace dice_tokenizer {
         // add_sub     = mul_div ((+|-) mul_div)*
         // mul_div     = power ((*|/) power)*
         // power       = d_level (^ d_level)*
-        // d_level     = (d d_level) | primary (d d_level)*
-        // primary     = number | (expr)
+        // d_level     = (+|-) d_level | (d d_level) | primary (d d_level)*
+        // primary     = number | '('expr')'
         Lexer lexer;
         Token cur;
 
@@ -439,6 +451,15 @@ namespace dice_tokenizer {
         }
 
         ExpTree* parseDLevel() {
+            if (cur.type == TokenType::PLUS) {
+                next();
+                return parseDLevel();
+            }
+            if (cur.type == TokenType::MINUS) {
+                next();
+                auto right = parseDLevel();
+                return new ExpTree(OpType::NEG, nullptr, right);
+            }
             ExpTree* node = nullptr;
 
             if (cur.type == TokenType::D) {
