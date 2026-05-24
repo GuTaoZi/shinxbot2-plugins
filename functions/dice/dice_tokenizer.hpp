@@ -274,9 +274,7 @@ namespace dice_tokenizer {
 
                 double rval = 0;
                 if (num >= 100) {
-                    if (sides <= 1) {
-                        rval = num;
-                    } else {
+                    if (sides >= 1) {
                         double mean = num * (sides + 1.0) / 2.0;
                         double stddev = sqrt(num * (1ll * sides * sides - 1) / 12.0);
                         std::normal_distribution<double> dist(mean, stddev);
