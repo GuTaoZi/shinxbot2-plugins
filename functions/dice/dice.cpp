@@ -14,7 +14,7 @@ static std::string remove_all_spaces(const std::string& s) {
 }
 
 void dice::process(std::string message, const msg_meta &conf) {
-    message = trim(message);
+    message = remove_all_spaces(message);
 
     try {
         if (!message.empty() && message[0] == '.') {
@@ -54,7 +54,7 @@ bool dice::check(std::string message, const msg_meta &conf) {
 }
 
 std::string dice::help() {
-    return "骰子投掷：输入如 d20、3d6、3d6+5、2d6+2d4+3、.2d6+2d4+3 的表达式进行投掷";
+    return "骰子投掷：输入如 d20、3d6、3d6+5、2d6+2d4+3、min(3d6)、max(2d6)、.2d6+2d4+3 的表达式进行投掷";
 }
 
 DECLARE_FACTORY_FUNCTIONS(dice)
