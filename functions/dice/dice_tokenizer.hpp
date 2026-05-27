@@ -338,7 +338,7 @@ namespace dice_tokenizer {
                             if (rval > 1ll * num * sides) rval = 1ll * num * sides;
                         }
                         renderedStr = fmt::format("({}d{}={})", num, sides, rval);
-                    } else if (num >= 10) {
+                    } else if (num >= 20) {
                         for (int i = 0; i < num; ++i) {
                             rval += dice_random(sides);
                         }
@@ -370,7 +370,7 @@ namespace dice_tokenizer {
                             rval = 0;
                         }
                         renderedStr = fmt::format("({}d{}{}={:.0f})", num, sides, mode == DiceMode::MIN ? "min" : "max", rval);
-                    } else if (num >= 10) {
+                    } else if (num >= 20) {
                         for (int i = 0; i < num; ++i) {
                             int rrval = dice_random(sides);
                             if (mode == DiceMode::MIN) {
