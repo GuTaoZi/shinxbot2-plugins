@@ -2,19 +2,8 @@
 #include "utils.h"
 #include "dice_tokenizer.hpp"
 
-static std::string remove_all_spaces(const std::string& s) {
-    std::string out;
-    out.reserve(s.size());
-    for (unsigned char ch : s) {
-        if (!std::isspace(ch)) {
-            out.push_back(static_cast<char>(ch));
-        }
-    }
-    return out;
-}
-
 void dice::process(std::string message, const msg_meta &conf) {
-    message = remove_all_spaces(message);
+    message = trim(message);
 
     try {
         if (!message.empty() && message[0] == '.') {

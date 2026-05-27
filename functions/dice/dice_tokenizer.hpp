@@ -84,11 +84,11 @@ namespace dice_tokenizer {
                 return 2;
             case OpType::POW:
                 return 3;
-            case OpType::D_UNARY:
-            case OpType::D_BINARY:
-                return 4;
             case OpType::MINFUNC:
             case OpType::MAXFUNC:
+                return 4;
+            case OpType::D_UNARY:
+            case OpType::D_BINARY:
                 return 5;
             default:
                 return 0;
