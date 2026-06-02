@@ -743,7 +743,7 @@ namespace dice_tokenizer {
                 auto node = parseAddSub();
                 while (cur.type == TokenType::COMMA) {
                     if (func == OpType::MINFUNC) func = OpType::MINLISTFUNC;
-                    else func = OpType::MAXLISTFUNC;
+                    else if (func == OpType::MAXFUNC) func = OpType::MAXLISTFUNC;
                     next();
                     auto nextArg = parseAddSub();
                     node = new ExpTree(func, node, nextArg);
