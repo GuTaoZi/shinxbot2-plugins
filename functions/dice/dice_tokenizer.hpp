@@ -633,7 +633,7 @@ namespace dice_tokenizer {
         // mul_div     = power ((*|/) power)*
         // power       = d_level (^ d_level)*
         // d_level     = (+|-) d_level | (d d_level) | primary (d d_level)*
-        // primary     = number | '('expr')' | min(expr_list) | max(expr_list) | min(add_sub) | max(add_sub)
+        // primary     = number | '('expr')' | min'('expr_list')' | max'('expr_list')' | min'('expr')' | max'('expr')'
         // expr_list   = add_sub (',' add_sub)*
         Lexer lexer;
         Token cur;
