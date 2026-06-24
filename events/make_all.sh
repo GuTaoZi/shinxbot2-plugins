@@ -6,7 +6,16 @@ compile_cmake() {
     cd "$directory"
     mkdir -p build  # Create build directory if not exists
     cd build
-    cmake -DCMAKE_BUILD_TYPE=Release ..
+    local build_type="Release"
+    local cmake_extra_args=()
+    if [[ "${SANITIZE:-0}" == "1" ]]; then
+        build_type="RelWithDebInfo"
+        local sanitize_flags="-fsanitize=address -fno-omit-frame-pointer -g"
+        cmake_extra_args+=("-DCMAKE_CXX_FLAGS=${sanitize_flags}")
+        cmake_extra_args+=("-DCMAKE_EXE_LINKER_FLAGS=${sanitize_flags}")
+        cmake_extra_args+=("-DCMAKE_SHARED_LINKER_FLAGS=${sanitize_flags}")
+    fi
+    cmake -DCMAKE_BUILD_TYPE="$build_type" "${cmake_extra_args[@]}" ..
     make -j1
     cd ../..
 }

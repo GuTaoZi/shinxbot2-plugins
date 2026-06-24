@@ -17,7 +17,6 @@ constexpr const char *CMD_REBUILD = "*92.rebuild";
 constexpr const char *CMD_CLEAR_CACHE = "*92.clear_cache";
 constexpr const char *CMD_PRECOMPUTE_PREFIX = "*92.precompute ";
 constexpr const char *CMD_PREFIX = "*92 ";
-constexpr const char *CMD_PREFIX_COMPAT = "92 ";
 
 constexpr const char *SPECIAL_92 = "92";
 constexpr const char *SPECIAL_929 = "929";
@@ -1008,14 +1007,6 @@ void auto92::process(std::string message, const msg_meta &conf)
              }
              return handle_eval(body);
          }},
-        {CMD_PREFIX_COMPAT,
-         [&]() {
-             std::string body;
-             if (!cmd_strip_prefix(m, CMD_PREFIX_COMPAT, body)) {
-                 return false;
-             }
-             return handle_eval(body);
-         }},
     };
 
     bool handled = false;
@@ -1030,8 +1021,7 @@ bool auto92::check(std::string message, const msg_meta &conf)
     (void)conf;
     std::string m = trim(message);
     return cmd_match_exact(m, {CMD_HELP, CMD_REBUILD, CMD_CLEAR_CACHE}) ||
-           cmd_match_prefix(
-               m, {CMD_PRECOMPUTE_PREFIX, CMD_PREFIX, CMD_PREFIX_COMPAT});
+           cmd_match_prefix(m, {CMD_PRECOMPUTE_PREFIX, CMD_PREFIX});
 }
 
 std::string auto92::help()

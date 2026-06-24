@@ -17,6 +17,7 @@ SET(CMAKE_INSTALL_RPATH_USE_LINK_PATH FALSE)
 
 # Include directories
 find_package(fmt REQUIRED)
+find_package(CURL REQUIRED)
 include_directories(${fmt_INCLUDE_DIRS})
 include_directories("../../lib/base64/include")
 include_directories("../../lib/cpp-httplib")
@@ -32,6 +33,7 @@ include_directories(${ImageMagick_INCLUDE_DIRS})
 
 add_library({CNAME} SHARED ${MAIN_SOURCES} ${UTIL_SOURCES} ${UTIL_META_SOURCES})
 target_link_libraries({CNAME} PRIVATE fmt::fmt)
+target_link_libraries({CNAME} PRIVATE CURL::libcurl)
 set_target_properties({CNAME} PROPERTIES
     INSTALL_RPATH "./lib"
 )

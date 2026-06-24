@@ -248,11 +248,11 @@ void bottle::load_unlocked()
         bottles_.push_back(std::move(one));
     }
 
-    if (bottles_.size() > kMaxBottleCount) {
-        bottles_.erase(bottles_.begin(),
-                       bottles_.begin() + static_cast<long>(bottles_.size() -
-                                                            kMaxBottleCount));
-    }
+    // if (bottles_.size() > kMaxBottleCount) {
+    //     bottles_.erase(bottles_.begin(),
+    //                    bottles_.begin() + static_cast<long>(bottles_.size() -
+    //                                                         kMaxBottleCount));
+    // }
 
     dedup_bottles_unlocked();
     last_dedup_at_ = static_cast<int64_t>(std::time(nullptr));
@@ -405,7 +405,7 @@ void bottle::process(std::string message, const msg_meta &conf)
             user_map[conf.user_id] = now;
 
             if (bottles_.size() >= kMaxBottleCount) {
-                bottles_.erase(bottles_.begin());
+                // bottles_.erase(bottles_.begin());
             }
 
             bottles_.push_back(
@@ -446,7 +446,7 @@ void bottle::process(std::string message, const msg_meta &conf)
 
             const int idx = get_random(static_cast<int>(bottles_.size()));
             text = bottles_[idx].text;
-            bottles_.erase(bottles_.begin() + idx);
+            // bottles_.erase(bottles_.begin() + idx);
             ++mutations_since_dedup_;
             maybe_dedup_unlocked(now, false);
 
