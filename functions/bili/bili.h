@@ -72,10 +72,14 @@ private:
     std::string cookie_override_;
 
     static constexpr int kCleanupIntervalSec = 3600; // prune orphans hourly
+    // Video (WBI arc/search) is heavily rate-limited, so each poll cycle only
+    // checks this many UIDs' videos, round-robin, to stay under risk control.
+    static constexpr size_t kVideoPerPoll = 8;
 
     int poll_interval_sec_ = kDefaultPollIntervalSec;
     std::time_t next_poll_ts_ = 0;
     std::time_t next_cleanup_ts_ = 0;
+    size_t video_poll_cursor_ = 0; // round-robin index into the poll UID list
     std::time_t last_poll_callback_ts_ = 0;
     std::time_t last_poll_run_ts_ = 0;
     uint64_t poll_callback_count_ = 0;
@@ -110,7 +114,10 @@ private:
     static std::string compact_text(const std::string &raw, size_t max_len);
 
     up_snapshot_t fetch_snapshot(userid_t uid) const;
-    up_snapshot_t fetch_snapshot_for_poll(userid_t uid) const;
+    // want_video: fetch the latest video via the (rate-limited) WBI arc/search.
+    // The poll passes true for only a rotating subset of UIDs each cycle so we
+    // stay under bilibili's risk-control threshold; live is always fetched.
+    up_snapshot_t fetch_snapshot_for_poll(userid_t uid, bool want_video) const;
     bool resolve_uid_by_room_id(userid_t room_id, up_snapshot_t &snapshot,
                                 userid_t &uid_out) const;
     bool fetch_live_snapshot(userid_t uid, up_snapshot_t &snapshot) const;

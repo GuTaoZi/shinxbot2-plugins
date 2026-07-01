@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -13,6 +14,7 @@
 #include <openssl/evp.h>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -132,6 +134,29 @@ http_fetch_t curl_get_raw(const std::string &host, const std::string &path,
     curl_easy_reset(curl);
 
     const std::string url = host + path;
+
+    // arc/search is aggressively risk-controlled; throttle it (>=2s apart) and
+    // back off 5min on a 412 so the poll can't hammer it into blocking the IP.
+    static std::mutex arc_mu;
+    static std::time_t arc_next_ok = 0;
+    static std::time_t arc_cooldown_until = 0;
+    const bool is_arc = path.find("wbi/arc/search") != std::string::npos;
+    if (is_arc) {
+        std::unique_lock<std::mutex> lk(arc_mu);
+        const std::time_t now = std::time(nullptr);
+        if (now < arc_cooldown_until) {
+            out.err = "arc/search in 412 cooldown";
+            return out;
+        }
+        if (now < arc_next_ok) {
+            const std::time_t wait = arc_next_ok - now;
+            lk.unlock();
+            std::this_thread::sleep_for(std::chrono::seconds(wait));
+            lk.lock();
+        }
+        arc_next_ok = std::time(nullptr) + 2;
+    }
+
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 12L);
@@ -186,6 +211,11 @@ http_fetch_t curl_get_raw(const std::string &host, const std::string &path,
     long code = -1;
     (void)curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
     out.status = static_cast<int>(code);
+
+    if (is_arc && out.status == 412) {
+        std::lock_guard<std::mutex> lk(arc_mu);
+        arc_cooldown_until = std::time(nullptr) + 300; // 5 min backoff
+    }
 
     if (hlist != nullptr) {
         curl_slist_free_all(hlist);

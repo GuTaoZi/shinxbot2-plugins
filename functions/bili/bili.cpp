@@ -72,7 +72,7 @@ std::string build_help_text(help_level_t level, bool in_group,
                             bool member_manage_open)
 {
     std::ostringstream oss;
-    oss << "Biliget\n";
+    oss << "Bili\n";
     oss << "----------\n";
     oss << "bili.help\n";
     oss << "bili.list\n";
@@ -1583,7 +1583,8 @@ bili::up_snapshot_t bili::fetch_snapshot(userid_t uid) const
     return s;
 }
 
-bili::up_snapshot_t bili::fetch_snapshot_for_poll(userid_t uid) const
+bili::up_snapshot_t bili::fetch_snapshot_for_poll(userid_t uid,
+                                                  bool want_video) const
 {
     up_snapshot_t s;
     userid_t target_uid = uid;
@@ -1599,8 +1600,12 @@ bili::up_snapshot_t bili::fetch_snapshot_for_poll(userid_t uid) const
         target_uid = s.canonical_uid;
     }
 
-    (void)fetch_video_snapshot(target_uid, s);
-    (void)fetch_dynamic_snapshot(target_uid, s);
+    // Video only for the round-robin subset this cycle (arc/search is rate
+    // limited). Dynamics are intentionally NOT polled: the web-dynamic feed is
+    // gaia-gated (always 412) so polling it only burns the risk-control budget.
+    if (want_video) {
+        (void)fetch_video_snapshot(target_uid, s);
+    }
 
     if (s.canonical_uid == 0) {
         s.canonical_uid = target_uid;
@@ -1687,7 +1692,7 @@ std::string bili::query_one(userid_t uid) const
     const up_snapshot_t snap = fetch_snapshot(uid);
 
     std::ostringstream oss;
-    oss << "[Biliget 查询]\n";
+    oss << "[Bili 查询]\n";
     if (!snap.name.empty()) {
         oss << "UP: " << snap.name << "\n";
     }
@@ -1719,25 +1724,14 @@ std::string bili::query_one(userid_t uid) const
             oss << "[CQ:image,file=" << snap.live_cover << ",id=40000]";
         }
     }
-    else {
-        oss << "未获取到直播信息\n";
-    }
 
+    // Only surface sections that actually resolved — failed fetches (e.g. video
+    // rate-limited, dynamics gaia-gated) are omitted rather than shown as errors.
     if (snap.has_video) {
         oss << "最新视频：" << compact_text(snap.video_title, 120) << "\n";
         oss << "https://www.bilibili.com/video/" << snap.video_bvid << "\n";
         if (!snap.video_cover.empty()) {
             oss << "[CQ:image,file=" << snap.video_cover << ",id=40000]";
-        }
-    }
-    else {
-        oss << "未获取到视频";
-        if (!snap.video_reason.empty()) {
-            oss << "（" << compact_text(snap.video_reason, 84) << "）";
-        }
-        oss << "\n";
-        if (snap.has_profile && snap.profile_archive_count >= 0) {
-            oss << "公开视频 " << snap.profile_archive_count << "\n";
         }
     }
 
@@ -1746,12 +1740,6 @@ std::string bili::query_one(userid_t uid) const
         oss << "https://t.bilibili.com/" << snap.dynamic_id << "\n";
         if (!snap.dynamic_cover.empty()) {
             oss << "[CQ:image,file=" << snap.dynamic_cover << ",id=40000]";
-        }
-    }
-    else {
-        oss << "未获取到动态";
-        if (!snap.dynamic_reason.empty()) {
-            oss << "（" << compact_text(snap.dynamic_reason, 84) << "）";
         }
     }
 
@@ -1863,7 +1851,7 @@ bool bili::send_list_group_subscriptions_forward(groupid_t gid,
         Json::Value node(Json::objectValue);
         Json::Value data(Json::objectValue);
         node["type"] = "node";
-        data["name"] = "Biliget";
+        data["name"] = "Bili";
         data["uin"] = std::to_string(conf.p->get_botqq());
         data["content"] = string_to_messageArr(content);
         node["data"] = data;
@@ -1981,7 +1969,7 @@ bool bili::send_live_now_forward(groupid_t gid, const msg_meta &conf) const
         Json::Value node(Json::objectValue);
         Json::Value data(Json::objectValue);
         node["type"] = "node";
-        data["name"] = "Biliget";
+        data["name"] = "Bili";
         data["uin"] = std::to_string(conf.p->get_botqq());
         data["content"] =
             string_to_messageArr(build_live_now_message(it.uid, it.snap));

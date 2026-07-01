@@ -67,6 +67,19 @@ void bili::handle_poll(bot *p)
         uid_list.push_back(entry.first);
     }
 
+    // Round-robin window of UIDs whose video we check this cycle (arc/search is
+    // rate limited); live is checked for everyone. Advance the cursor per cycle.
+    const size_t n_uids = uid_list.size();
+    const size_t v_start = n_uids ? (video_poll_cursor_ % n_uids) : 0;
+    const size_t v_count = std::min<size_t>(kVideoPerPoll, n_uids);
+    video_poll_cursor_ = n_uids ? ((v_start + v_count) % n_uids) : 0;
+    const auto want_video = [&](size_t i) -> bool {
+        if (v_count == 0) {
+            return false;
+        }
+        return ((i + n_uids - v_start) % n_uids) < v_count;
+    };
+
     std::vector<up_snapshot_t> snaps(uid_list.size());
     std::vector<bool> snap_ok(uid_list.size(), false);
 
@@ -87,7 +100,7 @@ void bili::handle_poll(bot *p)
 
                 const userid_t uid = uid_list[i];
                 try {
-                    snaps[i] = fetch_snapshot_for_poll(uid);
+                    snaps[i] = fetch_snapshot_for_poll(uid, want_video(i));
                     snap_ok[i] = true;
                 }
                 catch (...) {

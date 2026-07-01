@@ -6,7 +6,7 @@
 
 namespace {
 
-const char *kBiligetDebugBuildTag = "2026-04-17-debug-v9";
+const char *kBiliDebugBuildTag = "2026-04-17-debug-v9";
 
 std::string fmt_debug_line(const std::string &name, const std::string &host,
                            const std::string &path)
@@ -49,7 +49,7 @@ std::string fmt_debug_line(const std::string &name, const std::string &host,
 std::string bili_debug_report(const std::string &id_text)
 {
     std::ostringstream oss;
-    oss << "[bili.debug] build=" << kBiligetDebugBuildTag
+    oss << "[bili.debug] build=" << kBiliDebugBuildTag
         << " input=" << id_text << "\n"
         << fmt_debug_line("A.getRoomPlayInfo", "https://api.live.bilibili.com",
                           "/xlive/web-room/v1/index/getRoomPlayInfo?room_id=" +
