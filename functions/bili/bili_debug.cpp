@@ -11,15 +11,15 @@ const char *kBiligetDebugBuildTag = "2026-04-17-debug-v9";
 std::string fmt_debug_line(const std::string &name, const std::string &host,
                            const std::string &path)
 {
-    const biliget_http::debug_result_t r =
-        biliget_http::debug_endpoint(host, path);
+    const bili_http::debug_result_t r =
+        bili_http::debug_endpoint(host, path);
 
     std::ostringstream oss;
     oss << name << ": ";
     if (!r.has_json) {
         oss << "no_json";
         if (!r.detail.empty()) {
-            oss << " detail='" << biliget_http::shorten_text(r.detail, 100)
+            oss << " detail='" << bili_http::shorten_text(r.detail, 100)
                 << "'";
         }
         return oss.str();
@@ -27,7 +27,7 @@ std::string fmt_debug_line(const std::string &name, const std::string &host,
 
     oss << "code=" << r.code;
     if (!r.message.empty()) {
-        oss << " msg='" << biliget_http::shorten_text(r.message, 40) << "'";
+        oss << " msg='" << bili_http::shorten_text(r.message, 40) << "'";
     }
     if (r.uid != 0) {
         oss << " uid=" << r.uid;
@@ -39,14 +39,14 @@ std::string fmt_debug_line(const std::string &name, const std::string &host,
         oss << " live_status=" << r.live_status;
     }
     if (!r.detail.empty()) {
-        oss << " detail='" << biliget_http::shorten_text(r.detail, 100) << "'";
+        oss << " detail='" << bili_http::shorten_text(r.detail, 100) << "'";
     }
     return oss.str();
 }
 
 } // namespace
 
-std::string biliget_debug_report(const std::string &id_text)
+std::string bili_debug_report(const std::string &id_text)
 {
     std::ostringstream oss;
     oss << "[bili.debug] build=" << kBiligetDebugBuildTag

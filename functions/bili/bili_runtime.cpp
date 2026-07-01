@@ -10,14 +10,14 @@
 
 namespace {
 
-using biliget_utils::is_dynamic_id_newer_than;
-using biliget_utils::is_fresh_publish_ts;
-using biliget_utils::join_tokens;
-using biliget_utils::send_group_msg_checked;
+using bili_utils::is_dynamic_id_newer_than;
+using bili_utils::is_fresh_publish_ts;
+using bili_utils::join_tokens;
+using bili_utils::send_group_msg_checked;
 
 } // namespace
 
-void biliget::handle_poll(bot *p)
+void bili::handle_poll(bot *p)
 {
     if (p == nullptr) {
         return;
@@ -25,27 +25,39 @@ void biliget::handle_poll(bot *p)
 
     std::time_t now = std::time(nullptr);
     std::unordered_map<userid_t, std::vector<groupid_t>> uid_to_groups;
+    bool do_cleanup = false;
+    bool do_poll = false;
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
         ++poll_callback_count_;
         last_poll_callback_ts_ = now;
-        if (now < next_poll_ts_) {
-            return;
+
+        if (now >= next_cleanup_ts_) {
+            next_cleanup_ts_ = now + kCleanupIntervalSec;
+            do_cleanup = true;
         }
 
-        ++poll_run_count_;
-        last_poll_run_ts_ = now;
-        next_poll_ts_ = now + poll_interval_sec_;
+        if (now >= next_poll_ts_) {
+            do_poll = true;
+            ++poll_run_count_;
+            last_poll_run_ts_ = now;
+            next_poll_ts_ = now + poll_interval_sec_;
 
-        for (const auto &it : group_subscriptions_) {
-            for (userid_t uid : it.second) {
-                uid_to_groups[uid].push_back(it.first);
+            for (const auto &it : group_subscriptions_) {
+                for (userid_t uid : it.second) {
+                    uid_to_groups[uid].push_back(it.first);
+                }
             }
         }
     }
 
-    if (uid_to_groups.empty()) {
+    // Maintenance (prune orphan cache / left groups) has its own hourly cadence.
+    if (do_cleanup) {
+        run_maintenance(p);
+    }
+
+    if (!do_poll || uid_to_groups.empty()) {
         return;
     }
 

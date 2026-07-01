@@ -46,7 +46,7 @@ std::string compact_text(const std::string &raw, size_t max_len)
 
 } // namespace
 
-namespace biliget_decode {
+namespace bili_decode {
 
 std::string decode_video_text(const std::string &input_text)
 {
@@ -66,7 +66,7 @@ std::string decode_video_text(const std::string &input_text)
     }
 
     Json::Value root =
-        biliget_http::safe_get_json("https://api.bilibili.com", path);
+        bili_http::safe_get_json("https://api.bilibili.com", path);
     if (!root.isObject() || root.get("code", -1).asInt() != 0 ||
         !root["data"].isObject()) {
         return "";
@@ -100,4 +100,4 @@ std::string decode_video_text(const std::string &input_text)
     return trim(oss.str());
 }
 
-} // namespace biliget_decode
+} // namespace bili_decode

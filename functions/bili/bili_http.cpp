@@ -94,6 +94,23 @@ std::string pick_proxy_env(const std::string &host)
     return v ? std::string(v) : std::string();
 }
 
+// Reusable per-thread CURL handle. curl_easy_reset() clears options but KEEPS
+// the handle's live connections, TLS session ids and DNS cache — so reusing one
+// handle per worker thread gives HTTP keep-alive + TLS session reuse across
+// requests (no fresh handshake per call). The handle is freed on thread exit.
+struct tls_curl_handle {
+    CURL *h = nullptr;
+    tls_curl_handle() { h = curl_easy_init(); }
+    ~tls_curl_handle()
+    {
+        if (h != nullptr) {
+            curl_easy_cleanup(h);
+        }
+    }
+    tls_curl_handle(const tls_curl_handle &) = delete;
+    tls_curl_handle &operator=(const tls_curl_handle &) = delete;
+};
+
 http_fetch_t curl_get_raw(const std::string &host, const std::string &path,
                           const std::map<std::string, std::string> &headers,
                           bool use_proxy)
@@ -102,11 +119,14 @@ http_fetch_t curl_get_raw(const std::string &host, const std::string &path,
     std::call_once(curl_once, []() { curl_global_init(CURL_GLOBAL_DEFAULT); });
 
     http_fetch_t out;
-    CURL *curl = curl_easy_init();
+    thread_local tls_curl_handle tls_handle;
+    CURL *curl = tls_handle.h;
     if (curl == nullptr) {
         out.err = "curl_easy_init failed";
         return out;
     }
+    // Reset options between calls but keep the connection/session/DNS caches.
+    curl_easy_reset(curl);
 
     const std::string url = host + path;
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
@@ -121,8 +141,7 @@ http_fetch_t curl_get_raw(const std::string &host, const std::string &path,
         const std::string proxy = pick_proxy_env(host);
         if (proxy.empty()) {
             out.err = "proxy requested but env is empty";
-            curl_easy_cleanup(curl);
-            return out;
+            return out; // handle is thread_local/reused; do not clean it up
         }
         curl_easy_setopt(curl, CURLOPT_PROXY, proxy.c_str());
     }
@@ -141,7 +160,7 @@ http_fetch_t curl_get_raw(const std::string &host, const std::string &path,
         std::string cookie = get_cookie_override_copy();
         if (cookie.empty()) {
             const char *env_cookie =
-                get_env_any("BILIGET_COOKIE", "biliget_cookie");
+                get_env_any("BILI_COOKIE", "bili_cookie");
             if (env_cookie && env_cookie[0] != '\0') {
                 cookie = env_cookie;
             }
@@ -168,7 +187,8 @@ http_fetch_t curl_get_raw(const std::string &host, const std::string &path,
     if (hlist != nullptr) {
         curl_slist_free_all(hlist);
     }
-    curl_easy_cleanup(curl);
+    // NOTE: do not curl_easy_cleanup(curl) — the handle is thread_local and
+    // reused so its keep-alive connections/TLS sessions survive to the next call.
 
     return out;
 }
@@ -191,7 +211,7 @@ bool looks_like_html(const std::string &raw)
 
 } // namespace
 
-namespace biliget_http {
+namespace bili_http {
 
 void set_cookie_override(const std::string &cookie)
 {
@@ -352,4 +372,4 @@ debug_result_t debug_endpoint(const std::string &host, const std::string &path)
     return out;
 }
 
-} // namespace biliget_http
+} // namespace bili_http

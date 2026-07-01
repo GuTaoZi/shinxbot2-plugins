@@ -6,7 +6,7 @@
 #include <limits>
 #include <sstream>
 
-namespace biliget_utils {
+namespace bili_utils {
 
 bool str_all_digits(const std::string &s)
 {
@@ -275,4 +275,4 @@ bool send_group_msg_checked(bot *p, groupid_t gid, const std::string &message,
     return false;
 }
 
-} // namespace biliget_utils
+} // namespace bili_utils

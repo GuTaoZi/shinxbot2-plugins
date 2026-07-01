@@ -11,33 +11,33 @@
 #include <sstream>
 
 namespace {
-const std::string BILIGET_CONFIG_FILE =
-    bot_config_path(nullptr, "features/biliget/biliget.json");
-const std::string BILIGET_CACHE_FILE =
-    bot_config_path(nullptr, "features/biliget/cache.json");
-const std::string BILIGET_SECRET_FILE =
-    bot_config_path(nullptr, "features/biliget/secret.json");
+const std::string BILI_CONFIG_FILE =
+    bot_config_path(nullptr, "features/bili/bili.json");
+const std::string BILI_CACHE_FILE =
+    bot_config_path(nullptr, "features/bili/cache.json");
+const std::string BILI_SECRET_FILE =
+    bot_config_path(nullptr, "features/bili/secret.json");
 const std::string LEGACY_BILI_PUSH_SECRET_FILE =
     bot_config_path(nullptr, "features/bili_push/secret.json");
-constexpr std::time_t BILIGET_LIST_NAME_CACHE_TTL_SEC = 1800;
+constexpr std::time_t BILI_LIST_NAME_CACHE_TTL_SEC = 1800;
 
-using biliget_http::safe_get_json;
+using bili_http::safe_get_json;
 
-using biliget_utils::api_fail_reason;
-using biliget_utils::compact_cover_url_169;
-using biliget_utils::compact_cover_url_avatar;
-using biliget_utils::compact_cover_url_keep_ratio;
-using biliget_utils::compact_cover_url_square;
-using biliget_utils::first_non_empty;
-using biliget_utils::join_tokens;
-using biliget_utils::json_to_i64;
-using biliget_utils::live_jump_link;
-using biliget_utils::mask_cookie_text;
-using biliget_utils::send_group_msg_checked;
-using biliget_utils::str_all_digits;
-using biliget_utils::str_to_u64_if_digits;
-using biliget_utils::up_name_with_uid;
-using biliget_utils::url_encode;
+using bili_utils::api_fail_reason;
+using bili_utils::compact_cover_url_169;
+using bili_utils::compact_cover_url_avatar;
+using bili_utils::compact_cover_url_keep_ratio;
+using bili_utils::compact_cover_url_square;
+using bili_utils::first_non_empty;
+using bili_utils::join_tokens;
+using bili_utils::json_to_i64;
+using bili_utils::live_jump_link;
+using bili_utils::mask_cookie_text;
+using bili_utils::send_group_msg_checked;
+using bili_utils::str_all_digits;
+using bili_utils::str_to_u64_if_digits;
+using bili_utils::up_name_with_uid;
+using bili_utils::url_encode;
 
 std::string stringify_dynamic_type(const Json::Value &item)
 {
@@ -332,7 +332,7 @@ std::string extract_live_cover_from_data(const Json::Value &data)
 
 } // namespace
 
-biliget::biliget()
+bili::bili()
 {
     std::lock_guard<std::mutex> lock(mutex_);
     load_config_unlocked();
@@ -341,7 +341,7 @@ biliget::biliget()
     next_poll_ts_ = std::time(nullptr) + 15;
 }
 
-biliget::~biliget()
+bili::~bili()
 {
     std::lock_guard<std::mutex> lock(mutex_);
     save_config_unlocked();
@@ -349,21 +349,21 @@ biliget::~biliget()
     save_cookie_secret_unlocked();
 }
 
-std::string biliget::config_path() const { return BILIGET_CONFIG_FILE; }
+std::string bili::config_path() const { return BILI_CONFIG_FILE; }
 
-std::string biliget::cache_path() const { return BILIGET_CACHE_FILE; }
+std::string bili::cache_path() const { return BILI_CACHE_FILE; }
 
-void biliget::load_cookie_secret_unlocked()
+void bili::load_cookie_secret_unlocked()
 {
     cookie_override_.clear();
     {
-        Json::Value root = string_to_json(readfile(BILIGET_SECRET_FILE, "{}"));
+        Json::Value root = string_to_json(readfile(BILI_SECRET_FILE, "{}"));
         if (root.isObject()) {
             cookie_override_ = root.get("cookie", "").asString();
         }
     }
 
-    // Migration compatibility: when renamed from bili_push -> biliget,
+    // Migration compatibility: when renamed from bili_push -> bili,
     // reuse legacy cookie if new secret file is still empty.
     if (cookie_override_.empty()) {
         Json::Value legacy =
@@ -377,21 +377,21 @@ void biliget::load_cookie_secret_unlocked()
     }
 
     if (!cookie_override_.empty()) {
-        biliget_http::set_cookie_override(cookie_override_);
+        bili_http::set_cookie_override(cookie_override_);
     }
     else {
-        biliget_http::clear_cookie_override();
+        bili_http::clear_cookie_override();
     }
 }
 
-void biliget::save_cookie_secret_unlocked() const
+void bili::save_cookie_secret_unlocked() const
 {
     Json::Value root(Json::objectValue);
     root["cookie"] = cookie_override_;
-    writefile(BILIGET_SECRET_FILE, root.toStyledString(), false);
+    writefile(BILI_SECRET_FILE, root.toStyledString(), false);
 }
 
-void biliget::load_config_unlocked()
+void bili::load_config_unlocked()
 {
     group_subscriptions_.clear();
     group_member_manage_open_.clear();
@@ -449,7 +449,7 @@ void biliget::load_config_unlocked()
     }
 }
 
-void biliget::save_config_unlocked() const
+void bili::save_config_unlocked() const
 {
     Json::Value root(Json::objectValue);
     root["poll_interval_sec"] = poll_interval_sec_;
@@ -473,7 +473,7 @@ void biliget::save_config_unlocked() const
     writefile(config_path(), root.toStyledString(), false);
 }
 
-void biliget::load_cache_unlocked()
+void bili::load_cache_unlocked()
 {
     up_cache_.clear();
     list_name_cache_.clear();
@@ -507,7 +507,7 @@ void biliget::load_cache_unlocked()
     }
 }
 
-void biliget::save_cache_unlocked() const
+void bili::save_cache_unlocked() const
 {
     Json::Value root(Json::objectValue);
     Json::Value users(Json::objectValue);
@@ -533,12 +533,116 @@ void biliget::save_cache_unlocked() const
     writefile(cache_path(), root.toStyledString(), false);
 }
 
-bool biliget::is_uid_token(const std::string &token)
+// Remove cached UP entries for UIDs not subscribed by any group. Caller holds mutex_.
+size_t bili::prune_orphan_cache_unlocked()
+{
+    std::set<userid_t> subscribed;
+    for (const auto &it : group_subscriptions_) {
+        subscribed.insert(it.second.begin(), it.second.end());
+    }
+
+    size_t removed = 0;
+    for (auto it = up_cache_.begin(); it != up_cache_.end();) {
+        if (subscribed.find(it->first) == subscribed.end()) {
+            it = up_cache_.erase(it);
+            ++removed;
+        }
+        else {
+            ++it;
+        }
+    }
+    for (auto it = list_name_cache_.begin(); it != list_name_cache_.end();) {
+        if (subscribed.find(it->first) == subscribed.end()) {
+            it = list_name_cache_.erase(it);
+        }
+        else {
+            ++it;
+        }
+    }
+    return removed;
+}
+
+// Periodic maintenance: drop subscriptions for groups the bot has left (per the
+// live group list) and cache entries for UIDs no longer subscribed anywhere.
+void bili::run_maintenance(bot *p)
+{
+    // Fetch the bot's current group list (network I/O — done outside the lock).
+    std::set<groupid_t> current_groups;
+    bool have_group_list = false;
+    if (p != nullptr) {
+        try {
+            Json::Value resp = string_to_json(p->cq_get("get_group_list"));
+            const Json::Value &data = resp["data"];
+            if (data.isArray()) {
+                have_group_list = true;
+                for (const auto &g : data) {
+                    if (g.isObject() && g.isMember("group_id")) {
+                        current_groups.insert(g["group_id"].asUInt64());
+                    }
+                }
+            }
+        }
+        catch (...) {
+            have_group_list = false;
+        }
+    }
+
+    size_t removed_groups = 0;
+    size_t removed_uids = 0;
+    bool config_dirty = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        // Only prune groups when we actually got a (non-empty) list back, so a
+        // transient API failure can never wipe every subscription.
+        if (have_group_list && !current_groups.empty()) {
+            for (auto it = group_subscriptions_.begin();
+                 it != group_subscriptions_.end();) {
+                if (current_groups.find(it->first) == current_groups.end()) {
+                    it = group_subscriptions_.erase(it);
+                    ++removed_groups;
+                    config_dirty = true;
+                }
+                else {
+                    ++it;
+                }
+            }
+            for (auto it = group_member_manage_open_.begin();
+                 it != group_member_manage_open_.end();) {
+                if (current_groups.find(*it) == current_groups.end()) {
+                    it = group_member_manage_open_.erase(it);
+                    config_dirty = true;
+                }
+                else {
+                    ++it;
+                }
+            }
+        }
+
+        removed_uids = prune_orphan_cache_unlocked();
+
+        if (config_dirty) {
+            save_config_unlocked();
+        }
+        if (removed_uids > 0) {
+            save_cache_unlocked();
+        }
+    }
+
+    if ((removed_groups > 0 || removed_uids > 0) && p != nullptr) {
+        p->setlog(LOG::INFO,
+                  fmt::format("bili maintenance: pruned {} absent group(s), "
+                              "{} orphan uid cache entr(ies)",
+                              removed_groups, removed_uids));
+    }
+}
+
+bool bili::is_uid_token(const std::string &token)
 {
     return str_all_digits(trim(token));
 }
 
-bool biliget::resolve_target_to_uid(const std::string &token, userid_t &uid_out,
+bool bili::resolve_target_to_uid(const std::string &token, userid_t &uid_out,
                                     std::string &err,
                                     bool allow_room_id_resolution) const
 {
@@ -645,7 +749,7 @@ bool biliget::resolve_target_to_uid(const std::string &token, userid_t &uid_out,
 }
 
 std::vector<userid_t>
-biliget::parse_uid_list(const std::string &args,
+bili::parse_uid_list(const std::string &args,
                         std::vector<std::string> *failed_tokens) const
 {
     std::string normalized = args;
@@ -672,7 +776,7 @@ biliget::parse_uid_list(const std::string &args,
     return std::vector<userid_t>(uniq.begin(), uniq.end());
 }
 
-bool biliget::can_manage_group(const msg_meta &conf) const
+bool bili::can_manage_group(const msg_meta &conf) const
 {
     if (conf.p == nullptr) {
         return false;
@@ -686,13 +790,13 @@ bool biliget::can_manage_group(const msg_meta &conf) const
     return false;
 }
 
-bool biliget::is_group_member_manage_open(groupid_t gid) const
+bool bili::is_group_member_manage_open(groupid_t gid) const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return group_member_manage_open_.count(gid) > 0;
 }
 
-bool biliget::can_modify_subscriptions(const msg_meta &conf) const
+bool bili::can_modify_subscriptions(const msg_meta &conf) const
 {
     if (can_manage_group(conf)) {
         return true;
@@ -703,7 +807,7 @@ bool biliget::can_modify_subscriptions(const msg_meta &conf) const
     return is_group_member_manage_open(conf.group_id);
 }
 
-std::string biliget::build_help_for_context(const msg_meta &conf) const
+std::string bili::build_help_for_context(const msg_meta &conf) const
 {
     const help_level_t level = resolve_help_level(conf);
     const bool in_group = (conf.message_type == "group");
@@ -712,7 +816,7 @@ std::string biliget::build_help_for_context(const msg_meta &conf) const
     return build_help_text(level, in_group, open);
 }
 
-bool biliget::parse_group_and_uids(
+bool bili::parse_group_and_uids(
     const msg_meta &conf, const std::string &args, groupid_t &target_group,
     std::vector<userid_t> &uids, bool allow_empty_uid_list,
     std::vector<std::string> *failed_tokens) const
@@ -726,7 +830,7 @@ bool biliget::parse_group_and_uids(
     return allow_empty_uid_list || !uids.empty();
 }
 
-std::string biliget::compact_text(const std::string &raw, size_t max_len)
+std::string bili::compact_text(const std::string &raw, size_t max_len)
 {
     std::string s = trim(raw);
     if (s.empty()) {
@@ -738,7 +842,7 @@ std::string biliget::compact_text(const std::string &raw, size_t max_len)
     return s.substr(0, max_len) + "...";
 }
 
-bool biliget::fetch_live_snapshot(userid_t uid, up_snapshot_t &snapshot) const
+bool bili::fetch_live_snapshot(userid_t uid, up_snapshot_t &snapshot) const
 {
     const std::string path =
         "/room/v1/Room/get_status_info_by_uids?uids%5B%5D=" +
@@ -795,7 +899,7 @@ bool biliget::fetch_live_snapshot(userid_t uid, up_snapshot_t &snapshot) const
     return true;
 }
 
-bool biliget::resolve_uid_by_room_id(userid_t room_id, up_snapshot_t &snapshot,
+bool bili::resolve_uid_by_room_id(userid_t room_id, up_snapshot_t &snapshot,
                                      userid_t &uid_out) const
 {
     uid_out = 0;
@@ -861,7 +965,7 @@ bool biliget::resolve_uid_by_room_id(userid_t room_id, up_snapshot_t &snapshot,
     return found;
 }
 
-bool biliget::fetch_live_snapshot_via_master(userid_t uid,
+bool bili::fetch_live_snapshot_via_master(userid_t uid,
                                              up_snapshot_t &snapshot) const
 {
     const std::string path =
@@ -909,7 +1013,7 @@ bool biliget::fetch_live_snapshot_via_master(userid_t uid,
     return snapshot.live_room_id != 0;
 }
 
-bool biliget::fetch_profile_snapshot(userid_t uid,
+bool bili::fetch_profile_snapshot(userid_t uid,
                                      up_snapshot_t &snapshot) const
 {
     const std::string path = "/x/web-interface/card?mid=" + std::to_string(uid);
@@ -935,7 +1039,7 @@ bool biliget::fetch_profile_snapshot(userid_t uid,
     return true;
 }
 
-bool biliget::fetch_video_snapshot(userid_t uid, up_snapshot_t &snapshot) const
+bool bili::fetch_video_snapshot(userid_t uid, up_snapshot_t &snapshot) const
 {
     auto apply_video_from_dynamic_items =
         [&](const Json::Value &items, const std::string &api_name) -> bool {
@@ -1230,7 +1334,7 @@ bool biliget::fetch_video_snapshot(userid_t uid, up_snapshot_t &snapshot) const
     return false;
 }
 
-bool biliget::fetch_dynamic_snapshot(userid_t uid,
+bool bili::fetch_dynamic_snapshot(userid_t uid,
                                      up_snapshot_t &snapshot) const
 {
     auto apply_dynamic_item = [&](const Json::Value &item) -> bool {
@@ -1447,7 +1551,7 @@ bool biliget::fetch_dynamic_snapshot(userid_t uid,
     return false;
 }
 
-biliget::up_snapshot_t biliget::fetch_snapshot(userid_t uid) const
+bili::up_snapshot_t bili::fetch_snapshot(userid_t uid) const
 {
     up_snapshot_t s;
     userid_t target_uid = uid;
@@ -1473,7 +1577,7 @@ biliget::up_snapshot_t biliget::fetch_snapshot(userid_t uid) const
     return s;
 }
 
-biliget::up_snapshot_t biliget::fetch_snapshot_for_poll(userid_t uid) const
+bili::up_snapshot_t bili::fetch_snapshot_for_poll(userid_t uid) const
 {
     up_snapshot_t s;
     userid_t target_uid = uid;
@@ -1506,7 +1610,7 @@ biliget::up_snapshot_t biliget::fetch_snapshot_for_poll(userid_t uid) const
     return s;
 }
 
-std::string biliget::build_dynamic_push_message(userid_t uid,
+std::string bili::build_dynamic_push_message(userid_t uid,
                                                 const up_snapshot_t &snap) const
 {
     std::ostringstream oss;
@@ -1523,7 +1627,7 @@ std::string biliget::build_dynamic_push_message(userid_t uid,
     return oss.str();
 }
 
-std::string biliget::build_video_push_message(userid_t uid,
+std::string bili::build_video_push_message(userid_t uid,
                                               const up_snapshot_t &snap) const
 {
     std::ostringstream oss;
@@ -1540,7 +1644,7 @@ std::string biliget::build_video_push_message(userid_t uid,
     return oss.str();
 }
 
-std::string biliget::build_live_on_push_message(userid_t uid,
+std::string bili::build_live_on_push_message(userid_t uid,
                                                 const up_snapshot_t &snap) const
 {
     std::ostringstream oss;
@@ -1558,7 +1662,7 @@ std::string biliget::build_live_on_push_message(userid_t uid,
 }
 
 std::string
-biliget::build_live_off_push_message(userid_t uid,
+bili::build_live_off_push_message(userid_t uid,
                                      const up_snapshot_t &snap) const
 {
     std::ostringstream oss;
@@ -1572,7 +1676,7 @@ biliget::build_live_off_push_message(userid_t uid,
     return oss.str();
 }
 
-std::string biliget::query_one(userid_t uid) const
+std::string bili::query_one(userid_t uid) const
 {
     const up_snapshot_t snap = fetch_snapshot(uid);
 
@@ -1648,7 +1752,7 @@ std::string biliget::query_one(userid_t uid) const
     return trim(oss.str());
 }
 
-std::string biliget::list_group_subscriptions(groupid_t gid) const
+std::string bili::list_group_subscriptions(groupid_t gid) const
 {
     std::vector<userid_t> uids;
     std::unordered_map<userid_t, std::string> fallback_name_cache;
@@ -1699,7 +1803,7 @@ std::string biliget::list_group_subscriptions(groupid_t gid) const
 
     if (!fetched_names.empty()) {
         std::lock_guard<std::mutex> lock(mutex_);
-        const std::time_t expire_at = now + BILIGET_LIST_NAME_CACHE_TTL_SEC;
+        const std::time_t expire_at = now + BILI_LIST_NAME_CACHE_TTL_SEC;
         for (const auto &it : fetched_names) {
             list_name_cache_[it.first] = {it.second, expire_at};
         }
@@ -1728,7 +1832,7 @@ std::string biliget::list_group_subscriptions(groupid_t gid) const
     return trim(oss.str());
 }
 
-bool biliget::send_list_group_subscriptions_forward(groupid_t gid,
+bool bili::send_list_group_subscriptions_forward(groupid_t gid,
                                                     const msg_meta &conf) const
 {
     if (conf.p == nullptr || conf.message_type != "group") {
@@ -1788,7 +1892,7 @@ bool biliget::send_list_group_subscriptions_forward(groupid_t gid,
     return true;
 }
 
-std::string biliget::build_live_now_message(userid_t uid,
+std::string bili::build_live_now_message(userid_t uid,
                                             const up_snapshot_t &snap) const
 {
     std::ostringstream oss;
@@ -1804,7 +1908,7 @@ std::string biliget::build_live_now_message(userid_t uid,
     return trim(oss.str());
 }
 
-bool biliget::send_live_now_forward(groupid_t gid, const msg_meta &conf) const
+bool bili::send_live_now_forward(groupid_t gid, const msg_meta &conf) const
 {
     if (conf.p == nullptr || conf.message_type != "group") {
         return false;
@@ -1890,19 +1994,19 @@ bool biliget::send_live_now_forward(groupid_t gid, const msg_meta &conf) const
     return true;
 }
 
-void biliget::process(std::string message, const msg_meta &conf)
+void bili::process(std::string message, const msg_meta &conf)
 {
     const std::string raw = trim(message);
-    if (raw == "bili" || raw == "biliget") {
+    if (raw == "bili" || raw == "bili") {
         conf.p->cq_send(build_help_for_context(conf), conf);
         return;
     }
 
     std::string body;
     if (!cmd_strip_prefix(raw, "bili.", body) &&
-        !cmd_strip_prefix(raw, "biliget.", body)) {
+        !cmd_strip_prefix(raw, "bili.", body)) {
         if (has_video_token_for_decode(raw)) {
-            const std::string out = biliget_decode::decode_video_text(raw);
+            const std::string out = bili_decode::decode_video_text(raw);
             if (!out.empty()) {
                 conf.p->cq_send(out, conf);
             }
@@ -2263,7 +2367,7 @@ void biliget::process(std::string message, const msg_meta &conf)
              }
 
              try {
-                 conf.p->cq_send(biliget_debug_report(std::to_string(id)),
+                 conf.p->cq_send(bili_debug_report(std::to_string(id)),
                                  conf);
              }
              catch (const std::exception &e) {
@@ -2292,7 +2396,7 @@ void biliget::process(std::string message, const msg_meta &conf)
                  return true;
              }
 
-             std::string out = biliget_decode::decode_video_text(args);
+             std::string out = bili_decode::decode_video_text(args);
              if (out.empty()) {
                  conf.p->cq_send("未识别到有效 BV/av，或视频信息拉取失败",
                                  conf);
@@ -2583,7 +2687,7 @@ void biliget::process(std::string message, const msg_meta &conf)
                  }
                  std::lock_guard<std::mutex> lock(mutex_);
                  cookie_override_.clear();
-                 biliget_http::clear_cookie_override();
+                 bili_http::clear_cookie_override();
                  save_cookie_secret_unlocked();
                  conf.p->cq_send("cookie 已清空", conf);
                  return true;
@@ -2737,7 +2841,7 @@ void biliget::process(std::string message, const msg_meta &conf)
              {
                  std::lock_guard<std::mutex> lock(mutex_);
                  cookie_override_ = cookie;
-                 biliget_http::set_cookie_override(cookie_override_);
+                 bili_http::set_cookie_override(cookie_override_);
                  save_cookie_secret_unlocked();
              }
 
@@ -2755,18 +2859,18 @@ void biliget::process(std::string message, const msg_meta &conf)
     }
 }
 
-bool biliget::check(std::string message, const msg_meta &conf)
+bool bili::check(std::string message, const msg_meta &conf)
 {
     (void)conf;
     const std::string m = trim(message);
-    if (m == "bili" || m == "biliget" ||
-        cmd_match_prefix(m, {"bili.", "biliget."})) {
+    if (m == "bili" || m == "bili" ||
+        cmd_match_prefix(m, {"bili.", "bili."})) {
         return true;
     }
     return has_video_token_for_decode(m);
 }
 
-bool biliget::reload(const msg_meta &conf)
+bool bili::reload(const msg_meta &conf)
 {
     (void)conf;
     std::lock_guard<std::mutex> lock(mutex_);
@@ -2777,18 +2881,18 @@ bool biliget::reload(const msg_meta &conf)
     return true;
 }
 
-std::string biliget::help() { return "B站订阅推送与查询。完整命令：bili.help"; }
+std::string bili::help() { return "B站订阅推送与查询。完整命令：bili.help"; }
 
-std::string biliget::help(const msg_meta &conf, help_level_t level)
+std::string bili::help(const msg_meta &conf, help_level_t level)
 {
     (void)conf;
     (void)level;
     return help();
 }
 
-void biliget::set_callback(std::function<void(std::function<void(bot *p)>)> f)
+void bili::set_callback(std::function<void(std::function<void(bot *p)>)> f)
 {
     f([this](bot *p) { handle_poll(p); });
 }
 
-DECLARE_FACTORY_FUNCTIONS(biliget)
+DECLARE_FACTORY_FUNCTIONS(bili)

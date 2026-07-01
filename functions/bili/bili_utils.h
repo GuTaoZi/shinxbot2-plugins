@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace biliget_utils {
+namespace bili_utils {
 
 bool str_all_digits(const std::string &s);
 int64_t json_to_i64(const Json::Value &v, int64_t def = 0);
@@ -36,4 +36,4 @@ std::string mask_cookie_text(const std::string &cookie);
 bool send_group_msg_checked(bot *p, groupid_t gid, const std::string &message,
                             std::string &err);
 
-} // namespace biliget_utils
+} // namespace bili_utils

@@ -3,7 +3,7 @@
 #include <jsoncpp/json/json.h>
 #include <string>
 
-namespace biliget_http {
+namespace bili_http {
 
 Json::Value parse_json_relaxed(const std::string &raw);
 Json::Value safe_get_json(const std::string &host, const std::string &path);
@@ -24,4 +24,4 @@ struct debug_result_t {
 
 debug_result_t debug_endpoint(const std::string &host, const std::string &path);
 
-} // namespace biliget_http
+} // namespace bili_http

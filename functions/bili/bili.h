@@ -11,7 +11,7 @@
 #include <unordered_map>
 #include <vector>
 
-class biliget : public processable {
+class bili : public processable {
 private:
     static constexpr int kDefaultPollIntervalSec = 90;
 
@@ -71,8 +71,11 @@ private:
     mutable std::unordered_map<userid_t, name_cache_t> list_name_cache_;
     std::string cookie_override_;
 
+    static constexpr int kCleanupIntervalSec = 3600; // prune orphans hourly
+
     int poll_interval_sec_ = kDefaultPollIntervalSec;
     std::time_t next_poll_ts_ = 0;
+    std::time_t next_cleanup_ts_ = 0;
     std::time_t last_poll_callback_ts_ = 0;
     std::time_t last_poll_run_ts_ = 0;
     uint64_t poll_callback_count_ = 0;
@@ -136,9 +139,15 @@ private:
 
     void handle_poll(bot *p);
 
+    // Cleanup: drop cache entries for UIDs no longer subscribed by any group,
+    // and (using the bot's live group list) subscriptions for groups the bot
+    // has left/been removed from. Runs periodically from handle_poll.
+    size_t prune_orphan_cache_unlocked();
+    void run_maintenance(bot *p);
+
 public:
-    biliget();
-    ~biliget() override;
+    bili();
+    ~bili() override;
 
     void process(std::string message, const msg_meta &conf) override;
     bool check(std::string message, const msg_meta &conf) override;
