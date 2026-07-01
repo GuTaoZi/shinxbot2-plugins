@@ -4,10 +4,13 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <curl/curl.h>
 #include <map>
 #include <mutex>
+#include <openssl/evp.h>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -285,6 +288,127 @@ std::string shorten_text(const std::string &raw, size_t max_len)
         return raw;
     }
     return raw.substr(0, max_len) + "...";
+}
+
+// ---- WBI signing (w_rid/wts) --------------------------------------------
+namespace {
+
+std::string md5_hex(const std::string &in)
+{
+    unsigned char out[EVP_MAX_MD_SIZE];
+    unsigned int len = 0;
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    std::string hex;
+    if (ctx != nullptr && EVP_DigestInit_ex(ctx, EVP_md5(), nullptr) == 1 &&
+        EVP_DigestUpdate(ctx, in.data(), in.size()) == 1 &&
+        EVP_DigestFinal_ex(ctx, out, &len) == 1) {
+        static const char *hx = "0123456789abcdef";
+        hex.reserve(len * 2);
+        for (unsigned int i = 0; i < len; ++i) {
+            hex.push_back(hx[out[i] >> 4]);
+            hex.push_back(hx[out[i] & 0x0F]);
+        }
+    }
+    if (ctx != nullptr) {
+        EVP_MD_CTX_free(ctx);
+    }
+    return hex;
+}
+
+std::string url_encode_wbi(const std::string &s)
+{
+    std::string out;
+    out.reserve(s.size() * 3);
+    for (unsigned char c : s) {
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            out.push_back(static_cast<char>(c));
+        }
+        else {
+            char buf[4];
+            std::snprintf(buf, sizeof(buf), "%%%02X", c);
+            out += buf;
+        }
+    }
+    return out;
+}
+
+// filename of a URL without directory or extension (img_url/sub_url -> key)
+std::string url_key(const std::string &url)
+{
+    size_t slash = url.find_last_of('/');
+    std::string name = (slash == std::string::npos) ? url : url.substr(slash + 1);
+    size_t dot = name.find_last_of('.');
+    return (dot == std::string::npos) ? name : name.substr(0, dot);
+}
+
+// bilibili's fixed mixin-key reorder table
+const int kMixinTab[] = {
+    46, 47, 18, 2,  53, 8,  23, 32, 15, 50, 10, 31, 58, 3,  45, 35,
+    27, 43, 5,  49, 33, 9,  42, 19, 29, 28, 14, 39, 12, 38, 41, 13,
+    37, 48, 7,  16, 24, 55, 40, 61, 26, 17, 0,  1,  60, 51, 30, 4,
+    22, 25, 54, 21, 56, 59, 6,  63, 57, 62, 11, 36, 20, 34, 44, 52};
+
+// Fetch (and cache ~6h) the WBI mixin key derived from /x/web-interface/nav.
+std::string get_mixin_key()
+{
+    static std::mutex mu;
+    static std::string cached;
+    static std::time_t fetched_at = 0;
+
+    std::lock_guard<std::mutex> lock(mu);
+    const std::time_t now = std::time(nullptr);
+    if (!cached.empty() && now - fetched_at < 6 * 3600) {
+        return cached;
+    }
+
+    const http_fetch_t res =
+        curl_get_raw("https://api.bilibili.com", "/x/web-interface/nav",
+                     kBiliHeadersBare, false);
+    if (!res.body.empty()) {
+        Json::Value j = parse_json_relaxed(res.body);
+        const Json::Value wbi = j["data"]["wbi_img"];
+        const std::string img = url_key(wbi.get("img_url", "").asString());
+        const std::string sub = url_key(wbi.get("sub_url", "").asString());
+        if (!img.empty() && !sub.empty()) {
+            const std::string orig = img + sub;
+            std::string mixin;
+            mixin.reserve(32);
+            for (int idx : kMixinTab) {
+                if (idx < static_cast<int>(orig.size())) {
+                    mixin.push_back(orig[idx]);
+                }
+            }
+            cached = mixin.substr(0, 32);
+            fetched_at = now;
+        }
+    }
+    return cached;
+}
+
+} // namespace
+
+std::string wbi_sign_query(std::map<std::string, std::string> params)
+{
+    // Build sorted, url-encoded query (std::map iterates keys ascending).
+    const auto build_query = [](const std::map<std::string, std::string> &p) {
+        std::string q;
+        for (const auto &kv : p) {
+            if (!q.empty()) {
+                q.push_back('&');
+            }
+            q += url_encode_wbi(kv.first) + "=" + url_encode_wbi(kv.second);
+        }
+        return q;
+    };
+
+    const std::string mixin = get_mixin_key();
+    params["wts"] = std::to_string(std::time(nullptr));
+    const std::string base = build_query(params);
+    if (mixin.empty()) {
+        return base; // best-effort: unsigned (will likely 412, but not worse)
+    }
+    const std::string w_rid = md5_hex(base + mixin);
+    return base + "&w_rid=" + w_rid;
 }
 
 debug_result_t debug_endpoint(const std::string &host, const std::string &path)

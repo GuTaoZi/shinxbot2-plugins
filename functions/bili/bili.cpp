@@ -1145,11 +1145,17 @@ bool bili::fetch_video_snapshot(userid_t uid, up_snapshot_t &snapshot) const
         return true;
     };
 
-    const std::string path = "/x/space/arc/search?mid=" + std::to_string(uid) +
-                             "&pn=1&ps=5&order=pubdate";
+    // WBI-signed endpoint: /x/space/arc/search now 412s (risk control); the
+    // wbi variant with a w_rid/wts signature (+ login cookie) returns results.
+    const std::string path =
+        "/x/space/wbi/arc/search?" +
+        bili_http::wbi_sign_query({{"mid", std::to_string(uid)},
+                                   {"pn", "1"},
+                                   {"ps", "5"},
+                                   {"order", "pubdate"}});
     {
         Json::Value root = safe_get_json("https://api.bilibili.com", path);
-        snapshot.video_reason = api_fail_reason(root, "space.arc.search");
+        snapshot.video_reason = api_fail_reason(root, "space.wbi.arc.search");
         if (root.isObject() && root.get("code", -1).asInt() == 0) {
             const Json::Value vlist = root["data"]["list"]["vlist"];
             if (vlist.isArray() && !vlist.empty()) {
