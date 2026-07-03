@@ -116,6 +116,28 @@ int trailing_count(std::string &q)
     return std::min(n, 50);
 }
 
+// Drop all "[...]" segments — the tier list decorates names with "[Old]",
+// a "[route]", and "[FC]"/"[C/FC]"; stripping them lets a pasted label resolve.
+std::string strip_brackets(const std::string &s)
+{
+    std::string o;
+    int depth = 0;
+    for (char c : s) {
+        if (c == '[') {
+            ++depth;
+        }
+        else if (c == ']') {
+            if (depth > 0) {
+                --depth;
+            }
+        }
+        else if (depth == 0) {
+            o.push_back(c);
+        }
+    }
+    return trim(o);
+}
+
 // A player's clear rendered as one line, keyed by date for sorting.
 std::string clear_date(const Json::Value &s)
 {
@@ -339,30 +361,43 @@ bool celeste::fetch_and_build_unlocked()
 
 std::vector<int> celeste::resolve_maps(const std::string &q) const
 {
-    std::string nq = normalize(q);
-    auto ait = aliases_.find(nq); // community nickname -> canonical map name
-    if (ait != aliases_.end()) {
-        nq = normalize(ait->second);
-    }
-    if (nq.empty()) {
-        return {};
-    }
-    std::vector<int> exact, prefix, sub;
-    for (const auto &pr : map_name_idx_) {
-        const std::string &n = pr.first;
-        if (n == nq) {
-            exact.push_back(pr.second);
+    auto match = [this](std::string nq) -> std::vector<int> {
+        auto ait = aliases_.find(nq); // community nickname -> canonical map name
+        if (ait != aliases_.end()) {
+            nq = normalize(ait->second);
         }
-        else if (n.rfind(nq, 0) == 0) {
-            prefix.push_back(pr.second);
+        if (nq.empty()) {
+            return {};
         }
-        else if (n.find(nq) != std::string::npos) {
-            sub.push_back(pr.second);
+        std::vector<int> exact, prefix, sub;
+        for (const auto &pr : map_name_idx_) {
+            const std::string &n = pr.first;
+            if (n == nq) {
+                exact.push_back(pr.second);
+            }
+            else if (n.rfind(nq, 0) == 0) {
+                prefix.push_back(pr.second);
+            }
+            else if (n.find(nq) != std::string::npos) {
+                sub.push_back(pr.second);
+            }
         }
-    }
-    std::vector<int> &res = !exact.empty() ? exact : (!prefix.empty() ? prefix : sub);
-    if (res.size() > 12) {
-        res.resize(12);
+        std::vector<int> &res =
+            !exact.empty() ? exact : (!prefix.empty() ? prefix : sub);
+        if (res.size() > 12) {
+            res.resize(12);
+        }
+        return res;
+    };
+
+    std::vector<int> res = match(normalize(q));
+    if (res.empty()) {
+        // Retry with tier-list decorations ("[Old]"/"[route]"/"[FC]") removed,
+        // so a pasted tier-list label still resolves to its map.
+        const std::string stripped = strip_brackets(q);
+        if (stripped != trim(q)) {
+            res = match(normalize(stripped));
+        }
     }
     return res;
 }
