@@ -17,6 +17,7 @@ private:
         int id = 0;
         std::string name;
         int campaign_id = 0;
+        bool is_archived = false;
     };
 
     mutable std::mutex mu_;

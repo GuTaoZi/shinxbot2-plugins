@@ -245,7 +245,9 @@ bool celeste::ensure_cache()
 
 bool celeste::fetch_and_build_unlocked()
 {
-    const std::string body = http_get(base_url_ + "/api/lists/top-golden-list.php");
+    // archived=true so archived ("[Old]") maps are included, matching the site's export.
+    const std::string body =
+        http_get(base_url_ + "/api/lists/top-golden-list.php?archived=true");
     if (body.empty()) {
         return false;
     }
@@ -272,6 +274,7 @@ bool celeste::fetch_and_build_unlocked()
         mi.id = m.get("id", 0).asInt();
         mi.name = m.get("name", "").asString();
         mi.campaign_id = m.get("campaign_id", 0).asInt();
+        mi.is_archived = m.get("is_archived", false).asBool();
         if (mi.id != 0) {
             maps_[mi.id] = mi;
             map_name_idx_.emplace_back(normalize(mi.name), mi.id);
@@ -286,26 +289,41 @@ bool celeste::fetch_and_build_unlocked()
         }
     }
 
-    // The golden list groups CHALLENGES by tier: a map can appear in several
-    // tiers (e.g. a sub-route challenge), and non-Golden objectives (Segment,
-    // etc.) count too — so list every challenge under its tier.
+    // The golden list groups CHALLENGES by tier: a map (or whole campaign) can
+    // appear in several tiers via sub-route challenges. Build the same label the
+    // site's export uses: "[Old] <name> [<route>] [FC|C/FC]".
     const Json::Value &challenges = root["challenges"];
     for (const auto &ch : challenges) {
-        if (!ch.isMember("map_id") || ch["map_id"].isNull()) {
-            continue;
-        }
         const std::string tier = ch["difficulty"].get("name", "").asString();
         if (tier.empty()) {
             continue;
         }
-        auto mit = maps_.find(ch["map_id"].asInt());
-        if (mit == maps_.end()) {
-            continue;
+        std::string name;
+        bool archived = false;
+        if (ch.isMember("map_id") && !ch["map_id"].isNull()) {
+            auto mit = maps_.find(ch["map_id"].asInt());
+            if (mit == maps_.end()) {
+                continue;
+            }
+            name = mit->second.name;
+            archived = mit->second.is_archived;
         }
-        const std::string obj = ch["objective"].get("name", "").asString();
-        std::string label = mit->second.name;
-        if (!obj.empty() && obj != "Golden Berry") {
-            label += " (" + obj + ")"; // note non-standard objective/route
+        else { // campaign-level challenge (e.g. full-game / all-chapters)
+            auto cit = campaigns_.find(ch.get("campaign_id", 0).asInt());
+            if (cit == campaigns_.end() || cit->second.empty()) {
+                continue;
+            }
+            name = cit->second;
+        }
+        std::string label = (archived ? "[Old] " : "") + name;
+        if (ch["label"].isString() && !ch["label"].asString().empty()) {
+            label += " [" + ch["label"].asString() + "]";
+        }
+        if (ch.get("requires_fc", false).asBool()) {
+            label += " [FC]";
+        }
+        else if (ch.get("has_fc", false).asBool()) {
+            label += " [C/FC]";
         }
         tier_maps_[tier].push_back(label);
     }
