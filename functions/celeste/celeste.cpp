@@ -287,24 +287,33 @@ bool celeste::fetch_and_build_unlocked()
         }
     }
 
+    // A map's golden-list tier is its Golden Berry (or Platinum Berry) challenge
+    // — NOT any challenge. Silver/Segment/etc. don't define the golden tier.
     const Json::Value &challenges = root["challenges"];
+    std::unordered_map<int, int> tier_pri; // map_id -> 2 golden, 1 platinum
     for (const auto &ch : challenges) {
         if (!ch.isMember("map_id") || ch["map_id"].isNull()) {
-            continue; // v1 handles map-level challenges only
+            continue;
+        }
+        const std::string obj = ch["objective"].get("name", "").asString();
+        const int pri = obj == "Golden Berry" ? 2 : (obj == "Platinum Berry" ? 1 : 0);
+        if (pri == 0) {
+            continue;
+        }
+        const std::string tier = ch["difficulty"].get("name", "").asString();
+        if (tier.empty()) {
+            continue;
         }
         const int map_id = ch["map_id"].asInt();
-        const std::string tier = ch["difficulty"].get("name", "").asString();
-        const bool prefer = (ch["objective"].get("name", "").asString() == "Golden Berry");
-        // map_tier_ is only a quick hint (e.g. for tier listing); prefer the
-        // Golden Berry challenge's tier when a map has several challenges.
-        if (map_tier_.find(map_id) == map_tier_.end() || prefer) {
+        auto it = tier_pri.find(map_id);
+        if (it == tier_pri.end() || it->second < pri) {
             map_tier_[map_id] = tier;
-        }
-        if (!tier.empty()) {
-            tier_maps_[tier].push_back(map_id);
+            tier_pri[map_id] = pri;
         }
     }
-
+    for (const auto &kv : map_tier_) {
+        tier_maps_[kv.second].push_back(kv.first);
+    }
     for (auto &kv : tier_maps_) {
         auto &v = kv.second;
         std::sort(v.begin(), v.end());
@@ -614,42 +623,27 @@ void celeste::cmd_tier(const std::string &tier_arg, const msg_meta &conf)
     }
     const std::string a = normalize(tier_arg);
     const bool untiered = (a == "u" || a == "untiered" || a == "wei" || a.empty());
-    std::string tier_name;
-    if (!untiered) {
-        tier_name = "Tier " + tier_arg; // "17" -> "Tier 17"
-    }
+    const std::string tier_name = untiered ? "Undetermined" : "Tier " + tier_arg;
+    const std::string disp = untiered ? "未定级" : tier_name;
 
     std::vector<std::string> lines;
     {
         std::lock_guard<std::mutex> lock(mu_);
-        if (untiered) {
-            for (const auto &kv : maps_) {
-                if (map_tier_.find(kv.first) == map_tier_.end()) {
-                    lines.push_back("  " + kv.second.name);
-                }
-            }
-        }
-        else {
-            auto it = tier_maps_.find(tier_name);
-            if (it != tier_maps_.end()) {
-                for (int id : it->second) {
-                    lines.push_back("  " + maps_[id].name);
-                }
+        auto it = tier_maps_.find(tier_name);
+        if (it != tier_maps_.end()) {
+            for (int id : it->second) {
+                lines.push_back("  " + maps_[id].name);
             }
         }
         std::sort(lines.begin(), lines.end());
     }
     if (lines.empty()) {
         cq_send(conf.p,
-                fmt::format("{} 没有地图（或档位名不对，如 gold t17 / gold tu）。",
-                            untiered ? "未定级" : tier_name),
+                fmt::format("{} 没有地图（或档位名不对，如 gold t17 / gold tu）。", disp),
                 conf);
         return;
     }
-    send_lines(conf,
-               fmt::format("{} 地图 {} 张:", untiered ? "未定级" : tier_name,
-                           lines.size()),
-               lines);
+    send_lines(conf, fmt::format("{} 地图 {} 张:", disp, lines.size()), lines);
 }
 
 void celeste::cmd_alias(const std::string &arg, const msg_meta &conf)

@@ -113,6 +113,40 @@ std::string norm_subtier(const std::string &s)
     }
     return "";
 }
+
+// Parse a tier token: "t5", "5星", "5★" -> 5. A bare number (no t/星/★ marker)
+// returns -1 so it stays a name lookup. Non-tier tokens return -1.
+int parse_tier_token(const std::string &tok)
+{
+    std::string core = tok;
+    bool marked = false;
+    if (!core.empty() && (core[0] == 't' || core[0] == 'T')) {
+        core = core.substr(1);
+        marked = true;
+    }
+    for (const char *suf : {"星", "★"}) {
+        const size_t n = std::string(suf).size();
+        if (core.size() >= n && core.compare(core.size() - n, n, suf) == 0) {
+            core = core.substr(0, core.size() - n);
+            marked = true;
+            break;
+        }
+    }
+    if (!marked || core.empty()) {
+        return -1;
+    }
+    for (char c : core) {
+        if (!std::isdigit(static_cast<unsigned char>(c))) {
+            return -1;
+        }
+    }
+    try {
+        return std::stoi(core);
+    }
+    catch (...) {
+        return -1;
+    }
+}
 } // namespace
 
 hist::hist()
@@ -550,42 +584,47 @@ void hist::cmd_tier(const std::string &arg, const msg_meta &conf)
         stars = std::stoi(stars_tok);
     }
     catch (...) {
-        cq_send(conf.p, "用法: hist t<星数> [upper|lower]，如 hist t5 upper", conf);
+        cq_send(conf.p, "用法: hist t<星数> [upper|lower]，如 hist t5 upper 或 hist 5星",
+                conf);
         return;
     }
     const std::string want_sub = norm_subtier(rest);
 
-    std::vector<std::string> lines;
+    // Collect map names grouped by subtier ("upper" / "lower" / "").
+    std::map<std::string, std::vector<std::string>> by_sub;
     {
         std::lock_guard<std::mutex> lock(mu_);
         auto it = star_maps_.find(stars);
         if (it != star_maps_.end()) {
-            std::vector<int> ids = it->second;
-            std::sort(ids.begin(), ids.end(), [this](int a, int b) {
-                if (maps_[a].sub_tier != maps_[b].sub_tier) {
-                    return maps_[a].sub_tier > maps_[b].sub_tier; // upper before lower
-                }
-                return maps_[a].name < maps_[b].name;
-            });
-            for (int id : ids) {
+            for (int id : it->second) {
                 const MapInfo &m = maps_[id];
-                if (!want_sub.empty() && m.sub_tier != want_sub) {
-                    continue;
+                if (want_sub.empty() || m.sub_tier == want_sub) {
+                    by_sub[m.sub_tier].push_back("  " + m.name);
                 }
-                lines.push_back(
-                    want_sub.empty() && !m.sub_tier.empty()
-                        ? fmt::format("  {} {}", m.name,
-                                      m.sub_tier == "upper" ? "↑" : "↓")
-                        : "  " + m.name);
             }
         }
     }
-    const std::string label = difficulty_label(stars, want_sub);
-    if (lines.empty()) {
-        cq_send(conf.p, fmt::format("{} 没有地图。", label), conf);
+    for (auto &kv : by_sub) {
+        std::sort(kv.second.begin(), kv.second.end());
+    }
+
+    if (by_sub.empty()) {
+        cq_send(conf.p,
+                fmt::format("{} 没有地图。", difficulty_label(stars, want_sub)), conf);
         return;
     }
-    send_lines(conf, fmt::format("Hist {} 地图 {} 张:", label, lines.size()), lines);
+    // A specific subtier -> one message; a whole tier -> upper / lower / (none)
+    // as separate folded messages (a low tier can hold 30+ maps).
+    for (const char *sub : {"upper", "lower", ""}) {
+        auto it = by_sub.find(sub);
+        if (it == by_sub.end() || it->second.empty()) {
+            continue;
+        }
+        send_lines(conf,
+                   fmt::format("Hist {} 地图 {} 张:", difficulty_label(stars, sub),
+                               it->second.size()),
+                   it->second);
+    }
 }
 
 void hist::cmd_search(const std::string &q, const msg_meta &conf)
@@ -776,10 +815,9 @@ void hist::process(std::string message, const msg_meta &conf)
     else if (tl == "help") {
         cq_send(conf.p, help(), conf);
     }
-    else if (tl.size() >= 2 && tl[0] == 't' &&
-             std::isdigit(static_cast<unsigned char>(tl[1]))) {
-        // "t5" / "t5 upper" -> tier 5 (subtier from arg)
-        cmd_tier(tok.substr(1) + (arg.empty() ? "" : " " + arg), conf);
+    else if (int st = parse_tier_token(tok); st >= 0) {
+        // "t5" / "5星" / "5★" (+ optional upper|lower) -> tier listing
+        cmd_tier(std::to_string(st) + (arg.empty() ? "" : " " + arg), conf);
     }
     else {
         cmd_map(rest, conf); // bare: hist <keyword> => map lookup
@@ -791,7 +829,7 @@ std::string hist::help()
     return "CN Hist 查询:\nhttps://bbs.celemiao.com/hist\n"
            "hist map <关键词> - 查地图难度+最近通关者\n"
            "hist player <名字> - 查玩家统计+最近通关\n"
-           "hist t<星数> [upper|lower] - 列出该难度地图 (如 hist t5 upper)\n"
+           "hist <星数>星 [upper|lower] - 列出该难度地图 (如 hist 5星, hist t5 upper)\n"
            "hist ? <模糊词> - 搜索候选地图/玩家\n"
            "hist alias add <别名> = <地图> / del / list - 别名(管理)\n"
            "hist set recent <n> - 本群显示条数(管理)\n"
