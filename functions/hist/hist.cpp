@@ -448,14 +448,28 @@ void hist::cmd_map(const std::string &q, const msg_meta &conf)
         return;
     }
 
-    // Recent clearers from the map's run list.
-    const Json::Value d =
-        string_to_json(http_get(base_url_ + "/api/hist/maps/" + mi.slug));
+    // Runs are paginated 20/page, oldest-first — so the freshest clears live on
+    // the LAST page(s). Pull only the tail pages needed to cover `recent`.
+    auto fetch_page = [&](int page) {
+        return string_to_json(
+            http_get(base_url_ + fmt::format("/api/hist/maps/{}?page={}", mi.slug, page)));
+    };
+    const Json::Value first = fetch_page(1);
+    const Json::Value &pg = first["runsPagination"];
+    const int total_pages = std::max(1, pg.get("totalPages", 1).asInt());
+    const int per_page = std::max(1, pg.get("perPage", 20).asInt());
+    const int need_pages = std::min(total_pages, (recent + per_page - 1) / per_page);
+    const int start_page = total_pages - need_pages + 1;
+
     std::vector<std::pair<std::string, std::string>> rows;
-    for (const auto &r : d["runs"]) {
-        const std::string dt = r.get("completedAt", "").asString();
-        rows.emplace_back(dt, fmt::format("  {} · {}", r.get("username", "").asString(),
-                                          dt.substr(0, 10)));
+    for (int p = start_page; p <= total_pages; ++p) {
+        const Json::Value d = (p == 1) ? first : fetch_page(p);
+        for (const auto &r : d["runs"]) {
+            const std::string dt = r.get("completedAt", "").asString();
+            rows.emplace_back(dt, fmt::format("  {} · {}",
+                                              r.get("username", "").asString(),
+                                              dt.substr(0, 10)));
+        }
     }
     std::sort(rows.begin(), rows.end(),
               [](const auto &a, const auto &b) { return a.first > b.first; });
