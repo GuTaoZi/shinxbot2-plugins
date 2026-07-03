@@ -67,7 +67,7 @@ private:
     void cmd_map(const std::string &q, const msg_meta &conf);
     void cmd_player(const std::string &q, const msg_meta &conf);
     void cmd_search(const std::string &q, const msg_meta &conf);
-    void cmd_tier(const std::string &arg, const msg_meta &conf);
+    void cmd_tier(int stars, const std::string &want_sub, const msg_meta &conf);
     void cmd_alias(const std::string &arg, const msg_meta &conf);
     void cmd_set(const std::string &arg, const msg_meta &conf);
 

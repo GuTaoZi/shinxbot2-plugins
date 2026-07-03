@@ -98,54 +98,71 @@ int trailing_count(std::string &q)
     return std::min(n, 50);
 }
 
-// Normalize a subtier word: upper/u -> "upper", lower/l -> "lower", else "".
-std::string norm_subtier(const std::string &s)
+// Subtier from Chinese 上/下 -> "upper"/"lower" (English intentionally dropped).
+std::string sub_from(const std::string &s)
 {
-    std::string t;
-    for (char c : s) {
-        t.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-    }
-    if (t == "upper" || t == "u" || t == "up") {
+    const std::string t = trim(s);
+    if (t == "上") {
         return "upper";
     }
-    if (t == "lower" || t == "l" || t == "low") {
+    if (t == "下") {
         return "lower";
     }
     return "";
 }
 
-// Parse a tier token: "t5", "5星", "5★" -> 5. A bare number (no t/星/★ marker)
-// returns -1 so it stays a name lookup. Non-tier tokens return -1.
-int parse_tier_token(const std::string &tok)
+// A Chinese numeral (零一二…) or ASCII digits -> int; -1 if unrecognized.
+int cn_num(const std::string &s)
 {
-    std::string core = tok;
-    bool marked = false;
-    if (!core.empty() && (core[0] == 't' || core[0] == 'T')) {
-        core = core.substr(1);
-        marked = true;
+    static const std::map<std::string, int> cn = {
+        {"零", 0}, {"〇", 0}, {"一", 1}, {"二", 2}, {"两", 2}, {"三", 3}, {"四", 4},
+        {"五", 5}, {"六", 6}, {"七", 7}, {"八", 8}, {"九", 9}, {"十", 10}};
+    if (s.empty()) {
+        return -1;
     }
+    bool digits = true;
+    for (char c : s) {
+        if (!std::isdigit(static_cast<unsigned char>(c))) {
+            digits = false;
+            break;
+        }
+    }
+    if (digits) {
+        try {
+            return std::stoi(s);
+        }
+        catch (...) {
+            return -1;
+        }
+    }
+    auto it = cn.find(s);
+    return it != cn.end() ? it->second : -1;
+}
+
+// Parse a CN tier token: "五星", "5星上", "一星下" -> stars (+ sub from 上/下).
+// Requires the 星/★ marker, so plain names/numbers stay name lookups (-1).
+int parse_tier_token(const std::string &tok, std::string &sub)
+{
+    sub.clear();
+    std::string s = tok;
+    for (const char *suf : {"上", "下"}) {
+        const size_t n = std::string(suf).size();
+        if (s.size() >= n && s.compare(s.size() - n, n, suf) == 0) {
+            sub = sub_from(suf);
+            s = s.substr(0, s.size() - n);
+            break;
+        }
+    }
+    bool marked = false;
     for (const char *suf : {"星", "★"}) {
         const size_t n = std::string(suf).size();
-        if (core.size() >= n && core.compare(core.size() - n, n, suf) == 0) {
-            core = core.substr(0, core.size() - n);
+        if (s.size() >= n && s.compare(s.size() - n, n, suf) == 0) {
+            s = s.substr(0, s.size() - n);
             marked = true;
             break;
         }
     }
-    if (!marked || core.empty()) {
-        return -1;
-    }
-    for (char c : core) {
-        if (!std::isdigit(static_cast<unsigned char>(c))) {
-            return -1;
-        }
-    }
-    try {
-        return std::stoi(core);
-    }
-    catch (...) {
-        return -1;
-    }
+    return marked ? cn_num(s) : -1;
 }
 } // namespace
 
@@ -571,25 +588,12 @@ void hist::cmd_player(const std::string &q, const msg_meta &conf)
     send_lines(conf, title, lines);
 }
 
-void hist::cmd_tier(const std::string &arg, const msg_meta &conf)
+void hist::cmd_tier(int stars, const std::string &want_sub, const msg_meta &conf)
 {
     if (!ensure_cache()) {
         cq_send(conf.p, "Hist 数据获取失败，稍后再试。", conf);
         return;
     }
-    std::string rest;
-    const std::string stars_tok = first_token(arg, rest);
-    int stars = -1;
-    try {
-        stars = std::stoi(stars_tok);
-    }
-    catch (...) {
-        cq_send(conf.p, "用法: hist t<星数> [upper|lower]，如 hist t5 upper 或 hist 5星",
-                conf);
-        return;
-    }
-    const std::string want_sub = norm_subtier(rest);
-
     // Collect map names grouped by subtier ("upper" / "lower" / "").
     std::map<std::string, std::vector<std::string>> by_sub;
     {
@@ -797,14 +801,13 @@ void hist::process(std::string message, const msg_meta &conf)
     std::string arg;
     std::string tok = first_token(rest, arg);
     std::string tl = normalize(tok);
+    std::string tier_sub;
+    const int tier_st = parse_tier_token(tok, tier_sub);
     if (tl == "map") {
         cmd_map(arg, conf);
     }
     else if (tl == "player" || tl == "p") {
         cmd_player(arg, conf);
-    }
-    else if (tl == "tier") {
-        cmd_tier(arg, conf);
     }
     else if (tl == "alias") {
         cmd_alias(arg, conf);
@@ -815,9 +818,9 @@ void hist::process(std::string message, const msg_meta &conf)
     else if (tl == "help") {
         cq_send(conf.p, help(), conf);
     }
-    else if (int st = parse_tier_token(tok); st >= 0) {
-        // "t5" / "5星" / "5★" (+ optional upper|lower) -> tier listing
-        cmd_tier(std::to_string(st) + (arg.empty() ? "" : " " + arg), conf);
+    else if (tier_st >= 0) {
+        // "五星上" / "5星" / "一星下" -> tier listing (上/下 = upper/lower)
+        cmd_tier(tier_st, tier_sub.empty() ? sub_from(arg) : tier_sub, conf);
     }
     else {
         cmd_map(rest, conf); // bare: hist <keyword> => map lookup
@@ -829,7 +832,7 @@ std::string hist::help()
     return "CN Hist 查询:\nhttps://bbs.celemiao.com/hist\n"
            "hist map <关键词> - 查地图难度+最近通关者\n"
            "hist player <名字> - 查玩家统计+最近通关\n"
-           "hist <星数>星 [upper|lower] - 列出该难度地图 (如 hist 5星, hist t5 upper)\n"
+           "hist <数>星[上|下] - 列出该难度地图 (如 hist 五星上, hist 1星下)\n"
            "hist ? <模糊词> - 搜索候选地图/玩家\n"
            "hist alias add <别名> = <地图> / del / list - 别名(管理)\n"
            "hist set recent <n> - 本群显示条数(管理)\n"

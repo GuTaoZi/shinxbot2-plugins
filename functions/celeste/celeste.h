@@ -31,9 +31,10 @@ private:
     // representative submission per challenge.
     std::unordered_map<int, MapInfo> maps_;                 // map id -> info
     std::unordered_map<int, std::string> campaigns_;        // campaign id -> name
-    std::unordered_map<int, std::string> map_tier_;         // map id -> tier hint
     std::vector<std::pair<std::string, int>> map_name_idx_; // (normalized name, map id)
-    std::map<std::string, std::vector<int>> tier_maps_;     // tier name -> map ids
+    // tier name -> challenge labels (map name + objective note); a map can
+    // appear in several tiers via different challenges.
+    std::map<std::string, std::vector<std::string>> tier_maps_;
 
     // global aliases (community-shared): normalized nickname -> canonical map name
     std::unordered_map<std::string, std::string> aliases_;
