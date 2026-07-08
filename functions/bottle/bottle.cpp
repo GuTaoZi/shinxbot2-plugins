@@ -18,7 +18,9 @@ std::string bottle_help_text()
            "*bottle.help: 查看帮助\n"
            "*扔 <text>: 扔一个漂流瓶\n"
            "*捞: 捞一个漂流瓶\n"
-           "*bottle.cd 扔/捞 <秒>";
+           "*bottle.cd 扔/捞 <秒>\n"
+           "(管理)回复被捞消息 *查: 查看投递来源\n"
+           "(管理)回复被捞消息 *删: 永久删除该瓶";
 }
 
 bool can_set_cd(const msg_meta &conf)
@@ -141,6 +143,53 @@ std::string json_escape_keep_utf8(const std::string &s)
         }
     }
     return oss.str();
+}
+
+// Extract the replied-to message id from a "[CQ:reply,id=...]" segment; 0 if none.
+int64_t extract_reply_id(const std::string &s)
+{
+    const size_t p0 = s.find("[CQ:reply,id=");
+    if (p0 == std::string::npos) {
+        return 0;
+    }
+    size_t p = p0 + 13; // strlen("[CQ:reply,id=")
+    size_t e = p;
+    if (e < s.size() && s[e] == '-') {
+        ++e;
+    }
+    while (e < s.size() && std::isdigit(static_cast<unsigned char>(s[e]))) {
+        ++e;
+    }
+    if (e == p || (e == p + 1 && s[p] == '-')) {
+        return 0;
+    }
+    try {
+        return std::stoll(s.substr(p, e - p));
+    }
+    catch (...) {
+        return 0;
+    }
+}
+
+// Remove all "[CQ:...]" segments (reply/at/...) so the bare command remains.
+std::string strip_cq_codes(const std::string &s)
+{
+    std::string out;
+    size_t i = 0;
+    while (i < s.size()) {
+        if (s.compare(i, 4, "[CQ:") == 0) {
+            const size_t close = s.find(']', i);
+            if (close == std::string::npos) {
+                break;
+            }
+            i = close + 1;
+        }
+        else {
+            out.push_back(s[i]);
+            ++i;
+        }
+    }
+    return trim(out);
 }
 
 } // namespace
@@ -325,6 +374,13 @@ void bottle::process(std::string message, const msg_meta &conf)
 {
     const std::string raw = trim(message);
 
+    // ===== 管理: 回复被捞消息 *查/*删 =====
+    const std::string bare = strip_cq_codes(raw);
+    if (bare == "*查" || bare == "*删") {
+        handle_moderation(message, bare == "*删", conf);
+        return;
+    }
+
     if (raw == "*bottle.help") {
         conf.p->cq_send(bottle_help_text(), conf);
         return;
@@ -460,13 +516,98 @@ void bottle::process(std::string message, const msg_meta &conf)
     conf.p->cq_send(bottle_help_text(), conf);
 }
 
+// ===================== 管理：查/删 =====================
+
+void bottle::handle_moderation(const std::string &message, bool is_delete,
+                               const msg_meta &conf)
+{
+    const bool op = conf.p != nullptr && conf.p->is_op(conf.user_id);
+    const bool gop = conf.p != nullptr && conf.message_type == "group" &&
+                     is_group_op(conf.p, conf.group_id, conf.user_id);
+    if (is_delete ? !(op || gop) : !op) {
+        conf.p->cq_send(is_delete ? "仅 bot 管理或群管理可删除漂流瓶。"
+                                  : "仅 bot 管理可查询漂流瓶来源。",
+                        conf);
+        return;
+    }
+
+    const int64_t reply_id = extract_reply_id(message);
+    if (reply_id == 0) {
+        conf.p->cq_send(std::string("请回复一条由 *捞 得到的漂流瓶消息，再发送 ") +
+                            (is_delete ? "*删" : "*查") + "。",
+                        conf);
+        return;
+    }
+
+    // Fetch the quoted pickup message and recover the bottle text after the
+    // "你捞到一个匿名漂流瓶：\n" line.
+    Json::Value req;
+    req["message_id"] = reply_id;
+    const Json::Value resp = string_to_json(conf.p->cq_send("get_msg", req));
+    const Json::Value &data = resp.isMember("data") ? resp["data"] : resp;
+    if (!data.isMember("message")) {
+        conf.p->cq_send("无法获取被回复的消息，请重试。", conf);
+        return;
+    }
+    const std::string content = messageArr_to_string(data["message"]);
+    const size_t nl = content.find('\n');
+    if (nl == std::string::npos || content.find("漂流瓶") == std::string::npos) {
+        conf.p->cq_send("请回复一条由 *捞 得到的漂流瓶消息。", conf);
+        return;
+    }
+    const std::string candidate = trim(content.substr(nl + 1));
+    const std::string candidate_dec = trim(cq_decode(candidate));
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    int found = -1;
+    for (size_t i = 0; i < bottles_.size(); ++i) {
+        if (bottles_[i].text == candidate || bottles_[i].text == candidate_dec) {
+            found = static_cast<int>(i);
+            break;
+        }
+    }
+    if (found < 0) {
+        conf.p->cq_send("未找到对应漂流瓶（可能已被删除，或内容不符）。", conf);
+        return;
+    }
+
+    if (is_delete) {
+        bottles_.erase(bottles_.begin() + found);
+        ++mutations_since_dedup_;
+        save_unlocked();
+        conf.p->cq_send("已永久删除该漂流瓶。", conf);
+        return;
+    }
+
+    const bottle_item &b = bottles_[found];
+    std::string info = "该漂流瓶来源：\nQQ: " + std::to_string(b.sender_user_id);
+    if (b.sender_group_id != 0) {
+        info += "\n群: " + std::to_string(b.sender_group_id);
+    }
+    info += std::string("\n渠道: ") +
+            (b.sender_message_type.empty() ? "未知" : b.sender_message_type);
+    if (b.created_at > 0) {
+        const std::time_t t = static_cast<std::time_t>(b.created_at);
+        std::tm tmv{};
+        localtime_r(&t, &tmv);
+        char buf[32];
+        std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tmv);
+        info += "\n投递时间: " + std::string(buf);
+    }
+    conf.p->cq_send(info, conf);
+}
+
 // ===================== 其他 =====================
 
 bool bottle::check(std::string message, const msg_meta &conf)
 {
     (void)conf;
-    return cmd_match_prefix(trim(message),
-                            {"*扔", "*捞", "*bottle.help", "*bottle.cd"});
+    const std::string raw = trim(message);
+    const std::string bare = strip_cq_codes(raw);
+    if (bare == "*查" || bare == "*删") {
+        return true;
+    }
+    return cmd_match_prefix(raw, {"*扔", "*捞", "*bottle.help", "*bottle.cd"});
 }
 
 bool bottle::reload(const msg_meta &conf)

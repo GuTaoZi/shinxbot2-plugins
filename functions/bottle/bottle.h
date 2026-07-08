@@ -56,6 +56,11 @@ private:
                              const msg_meta &conf);
     cd_config &get_cd_config_unlocked(groupid_t gid);
 
+    // Moderation: reply to a "捞" pickup with *查 (trace sender, bot op) or
+    // *删 (permanently remove, bot op or group op).
+    void handle_moderation(const std::string &message, bool is_delete,
+                           const msg_meta &conf);
+
 public:
     bottle();
 
