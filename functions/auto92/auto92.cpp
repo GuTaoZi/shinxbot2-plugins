@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <fstream>
 #include <functional>
+#include <memory>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -215,6 +216,101 @@ std::string simplify_display_expr(std::string expr)
 }
 
 std::string trim_sign_space(const std::string &s) { return trim(s); }
+
+// --- parenthesis beautify: fully-paren tree -> minimal parens by priority ---
+struct expr_node {
+    bool leaf = true;
+    std::string num;
+    char op = 0;
+    std::unique_ptr<expr_node> l, r;
+};
+
+std::unique_ptr<expr_node> parse_paren_expr(const std::string &s, size_t &p)
+{
+    if (p >= s.size()) {
+        return nullptr;
+    }
+    if (std::isdigit((unsigned char)s[p])) {
+        auto n = std::make_unique<expr_node>();
+        const size_t st = p;
+        while (p < s.size() && std::isdigit((unsigned char)s[p])) {
+            ++p;
+        }
+        n->num = s.substr(st, p - st);
+        return n;
+    }
+    if (s[p] != '(') {
+        return nullptr;
+    }
+    ++p;
+    auto l = parse_paren_expr(s, p);
+    if (!l || p >= s.size()) {
+        return nullptr;
+    }
+    const char op = s[p++];
+    auto r = parse_paren_expr(s, p);
+    if (!r || p >= s.size() || s[p] != ')') {
+        return nullptr;
+    }
+    ++p;
+    auto n = std::make_unique<expr_node>();
+    n->leaf = false;
+    n->op = op;
+    n->l = std::move(l);
+    n->r = std::move(r);
+    return n;
+}
+
+int op_prec(char op)
+{
+    if (op == '+' || op == '-') {
+        return 1;
+    }
+    if (op == '*' || op == '/') {
+        return 2;
+    }
+    if (op == '^') {
+        return 3;
+    }
+    return 0;
+}
+
+std::string serialize_min_paren(const expr_node *n)
+{
+    if (n->leaf) {
+        return n->num;
+    }
+    const int p = op_prec(n->op);
+    const bool right_assoc = (n->op == '^');
+    std::string ls = serialize_min_paren(n->l.get());
+    std::string rs = serialize_min_paren(n->r.get());
+    if (!n->l->leaf) {
+        const int lp = op_prec(n->l->op);
+        if (lp < p || (lp == p && right_assoc)) {
+            ls = "(" + ls + ")";
+        }
+    }
+    if (!n->r->leaf) {
+        const int rp = op_prec(n->r->op);
+        if (rp < p || (rp == p && !right_assoc)) {
+            rs = "(" + rs + ")";
+        }
+    }
+    return ls + n->op + rs;
+}
+
+// Drop parentheses made redundant by operator priority/associativity. Value-
+// preserving (same-precedence right children keep their parens, so integer
+// -/÷ evaluation is unchanged). Falls back to raw if not fully-parenthesized.
+std::string beautify_expr(const std::string &expr)
+{
+    size_t p = 0;
+    auto root = parse_paren_expr(expr, p);
+    if (!root || p != expr.size()) {
+        return simplify_display_expr(expr);
+    }
+    return serialize_min_paren(root.get());
+}
 } // namespace
 
 auto92::auto92()
@@ -836,7 +932,8 @@ void auto92::process(std::string message, const msg_meta &conf)
             return true;
         }
 
-        std::string expr;
+        std::string canonical; // fully-parenthesized form (persisted/cached)
+        std::string display;    // beautified form shown to the user
         if (is_negative) {
             int64_t n;
             if (!parse_i64(raw, n)) {
@@ -844,13 +941,20 @@ void auto92::process(std::string message, const msg_meta &conf)
                                 conf);
                 return true;
             }
-            expr = "-(" + express_nonneg(-n) + ")";
+            const std::string inner = express_nonneg(-n);
+            if (!inner.empty()) {
+                canonical = "-(" + inner + ")";
+                display = "-(" + beautify_expr(inner) + ")";
+            }
         }
         else {
-            expr = express_u64(u64);
+            canonical = express_u64(u64);
+            if (!canonical.empty()) {
+                display = beautify_expr(canonical);
+            }
         }
 
-        if (expr.empty()) {
+        if (canonical.empty()) {
             conf.p->cq_send(
                 "未在资源边界内找到表达式（已限制时间/状态以保护服务器）。",
                 conf);
@@ -858,10 +962,10 @@ void auto92::process(std::string message, const msg_meta &conf)
         }
 
         if (!is_negative && u64 <= 2000000) {
-            save_persisted_entry(u64, expr);
+            save_persisted_entry(u64, canonical);
         }
 
-        conf.p->cq_send(raw + " = " + simplify_display_expr(expr), conf);
+        conf.p->cq_send(raw + " = " + display, conf);
         return true;
     };
 
