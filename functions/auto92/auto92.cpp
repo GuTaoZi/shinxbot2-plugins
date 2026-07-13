@@ -3,10 +3,12 @@
 #include "utils.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <climits>
 #include <cstdint>
 #include <fstream>
+#include <functional>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -24,19 +26,9 @@ constexpr const char *SPECIAL_92929 = "92929";
 
 constexpr int64_t SEARCH_TARGET_ABS_LIMIT = 2'000'000;
 constexpr int SEARCH_MAX_TERMS = 8;
-constexpr size_t SEARCH_STATE_BUDGET = 120000;
-constexpr size_t SEARCH_BEAM_WIDTH = 3500;
-constexpr int SEARCH_TIME_BUDGET_MS = 120;
+constexpr int SEARCH_TIME_BUDGET_MS = 250;
 
 using expr_map_t = std::unordered_map<int64_t, std::string>;
-
-struct alt_literal {
-    int64_t value;
-    std::string text;
-    char first;
-    char last;
-    bool has2;
-};
 
 bool starts_with_9_and_has_2(const std::string &expr)
 {
@@ -189,37 +181,6 @@ bool eval_fully_paren_expr(const std::string &expr, int64_t &out)
         return false;
     }
     return pos == expr.size();
-}
-
-bool is_alt_token(const std::string &s)
-{
-    if (s.empty()) {
-        return false;
-    }
-    for (size_t i = 1; i < s.size(); ++i) {
-        if (s[i] == s[i - 1]) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool pick_first_last_digit(const std::string &expr, char &first, char &last)
-{
-    bool seen = false;
-    first = 0;
-    last = 0;
-    for (char c : expr) {
-        if (c != '9' && c != '2') {
-            continue;
-        }
-        if (!seen) {
-            first = c;
-            seen = true;
-        }
-        last = c;
-    }
-    return seen;
 }
 
 bool wrapped_by_outer_parens(const std::string &s)
@@ -532,222 +493,145 @@ std::string auto92::express_nonneg(int64_t v) const
         memo_expr_[v] = "";
         return "";
     }
-    const int64_t value_limit = std::min<int64_t>(6'000'000, abs_v * 6 + 3000);
 
-    struct lit {
+    // Alternating 9/2 literals (short-first), split by leading digit.
+    struct tok {
         int64_t value;
         std::string text;
-        char first;
         char last;
         bool has2;
     };
-
-    std::vector<lit> literals;
-    literals.reserve(cache_.size());
-    std::unordered_set<std::string> seen;
-    for (const auto &e : cache_) {
-        if (e.value <= 0 || e.token.empty()) {
-            continue;
+    std::vector<tok> tok9, tok2;
+    for (int d = 1; d <= 7; ++d) {
+        for (char f : {'9', '2'}) {
+            std::string s = make_alternating_token(d, f);
+            int64_t val;
+            if (!parse_i64(s, val)) {
+                continue;
+            }
+            (f == '9' ? tok9 : tok2)
+                .push_back({val, s, s.back(), s.find('2') != std::string::npos});
         }
-        if (!is_alt_token(e.token)) {
-            continue;
-        }
-        if ((int)e.token.size() > 6) {
-            continue;
-        }
-        if (!seen.insert(e.token).second) {
-            continue;
-        }
-        literals.push_back({e.value, e.token, e.token.front(), e.token.back(),
-                            e.token.find('2') != std::string::npos});
     }
-
-    // Reuse previously solved expressions as composite literals.
-    for (const auto &kv : persisted_expr_) {
-        if (kv.first == 0 || kv.first > (uint64_t)value_limit) {
-            continue;
-        }
-        const std::string &expr = kv.second;
-        if (!is_global_alt_92_expr(expr)) {
-            continue;
-        }
-        char first = 0;
-        char last = 0;
-        if (!pick_first_last_digit(expr, first, last)) {
-            continue;
-        }
-        if (!seen.insert(expr).second) {
-            continue;
-        }
-        literals.push_back({(int64_t)kv.first, expr, first, last,
-                            expr.find('2') != std::string::npos});
-    }
-
-    std::sort(literals.begin(), literals.end(), [](const lit &a, const lit &b) {
+    const auto by_len = [](const tok &a, const tok &b) {
         if (a.text.size() != b.text.size()) {
             return a.text.size() < b.text.size();
         }
-        return a.text < b.text;
-    });
-
-    std::shuffle(literals.begin(), literals.end(), get_engine());
-
-    struct state {
-        int64_t value;
-        char last_digit;
-        bool has2;
-        int terms;
-        std::string expr;
+        return a.value < b.value;
     };
+    std::sort(tok9.begin(), tok9.end(), by_len);
+    std::sort(tok2.begin(), tok2.end(), by_len);
 
-    const int max_terms = SEARCH_MAX_TERMS;
+    const int64_t value_limit = std::min<int64_t>(
+        50'000'000, std::max<int64_t>(2'000'000, abs_v * 3 + 100'000));
+    // Operator order: prefer clear + then - * ^, division last.
+    static const char *const OPS = "+-*^/";
 
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::milliseconds(SEARCH_TIME_BUDGET_MS);
-
-    auto make_key = [](int64_t value, char last, bool has2, int terms) {
-        return std::to_string(value) + "|" + std::string(1, last) + "|" +
-               (has2 ? "1" : "0") + "|" + std::to_string(terms);
+    bool timed_out = false;
+    uint64_t steps = 0;
+    // value -> max remaining-depth already explored-and-failed, per (last, has2).
+    std::unordered_map<int64_t, std::array<int, 4>> failed;
+    const auto sub_idx = [](char last, bool has2) {
+        return (last == '2' ? 2 : 0) + (has2 ? 1 : 0);
     };
 
-    std::unordered_map<std::string, size_t> best_len;
-    std::vector<state> frontier;
-    frontier.reserve(256);
-
-    for (const auto &l : literals) {
-        if (l.first != '9') {
-            continue;
+    // Iterative-deepening DFS: the first solution found uses the fewest terms,
+    // giving the shortest/clearest expression deterministically.
+    std::function<bool(int64_t, char, bool, int, std::string &,
+                       const std::string &)>
+        dfs = [&](int64_t cur, char last, bool has2, int rem, std::string &out,
+                  const std::string &expr) -> bool {
+        if (cur == v && has2) {
+            out = expr;
+            return true;
         }
-        state s{l.value, l.last, l.has2, 1, l.text};
-        best_len[make_key(s.value, s.last_digit, s.has2, s.terms)] =
-            s.expr.size();
-        frontier.push_back(std::move(s));
-    }
-
-    auto accept = [&](const state &s) -> bool {
-        if (s.value != v || !s.has2 || !is_global_alt_92_expr(s.expr)) {
+        if (rem <= 0) {
             return false;
         }
-        int64_t check_v;
-        if (!eval_fully_paren_expr(s.expr, check_v) || check_v != v) {
+        if ((++steps & 1023u) == 0 &&
+            std::chrono::steady_clock::now() > deadline) {
+            timed_out = true;
             return false;
         }
-        memo_expr_[v] = s.expr;
-        return true;
-    };
-
-    for (const auto &s : frontier) {
-        if (accept(s)) {
-            return s.expr;
+        const int idx = sub_idx(last, has2);
+        auto fit = failed.find(cur);
+        if (fit != failed.end() && fit->second[idx] >= rem) {
+            return false;
         }
-    }
-
-    for (int depth = 1; depth < max_terms; ++depth) {
-        if (std::chrono::steady_clock::now() >= deadline) {
-            break;
-        }
-        std::vector<state> next;
-        next.reserve(frontier.size() * 6);
-
-        for (const auto &cur : frontier) {
-            const char need_first = (cur.last_digit == '9') ? '2' : '9';
-            for (const auto &l : literals) {
-                if (std::chrono::steady_clock::now() >= deadline) {
+        const char need = (last == '9') ? '2' : '9';
+        const std::vector<tok> &toks = (need == '9') ? tok9 : tok2;
+        for (const tok &t : toks) {
+            for (const char *op = OPS; *op != '\0'; ++op) {
+                int64_t nv = 0;
+                bool ok = false;
+                switch (*op) {
+                case '+':
+                    ok = checked_add(cur, t.value, nv);
+                    break;
+                case '-':
+                    ok = checked_sub(cur, t.value, nv);
+                    break;
+                case '*':
+                    ok = checked_mul(cur, t.value, nv);
+                    break;
+                case '^':
+                    ok = checked_pow_int(cur, t.value, nv);
+                    break;
+                case '/':
+                    ok = (t.value != 0 && cur % t.value == 0);
+                    if (ok) {
+                        nv = cur / t.value;
+                    }
+                    break;
+                default:
                     break;
                 }
-                if (l.first != need_first) {
+                if (!ok || nv < -value_limit || nv > value_limit) {
                     continue;
                 }
-                const bool nhas2 = cur.has2 || l.has2;
-
-                auto push = [&](char op, int64_t nv) {
-                    if (nv < -value_limit || nv > value_limit) {
-                        return;
-                    }
-                    state ns{nv, l.last, nhas2, cur.terms + 1,
-                             "(" + cur.expr + op + l.text + ")"};
-
-                    const std::string key =
-                        make_key(ns.value, ns.last_digit, ns.has2, ns.terms);
-                    auto it = best_len.find(key);
-                    if (it != best_len.end() && it->second <= ns.expr.size()) {
-                        return;
-                    }
-                    best_len[key] = ns.expr.size();
-                    if (best_len.size() > SEARCH_STATE_BUDGET) {
-                        return;
-                    }
-
-                    if (accept(ns)) {
-                        next.clear();
-                        next.push_back(std::move(ns));
-                        return;
-                    }
-                    next.push_back(std::move(ns));
-                };
-
-                int64_t t;
-                if (checked_add(cur.value, l.value, t)) {
-                    push('+', t);
-                    if (!next.empty() && next.back().value == v &&
-                        next.back().expr == memo_expr_[v]) {
-                        return memo_expr_[v];
-                    }
+                if (dfs(nv, t.last, has2 || t.has2, rem - 1, out,
+                        "(" + expr + *op + t.text + ")")) {
+                    return true;
                 }
-                if (checked_sub(cur.value, l.value, t)) {
-                    push('-', t);
-                    if (!next.empty() && next.back().value == v &&
-                        next.back().expr == memo_expr_[v]) {
-                        return memo_expr_[v];
-                    }
-                }
-                if (checked_mul(cur.value, l.value, t)) {
-                    push('*', t);
-                    if (!next.empty() && next.back().value == v &&
-                        next.back().expr == memo_expr_[v]) {
-                        return memo_expr_[v];
-                    }
-                }
-                if (l.value != 0 && cur.value % l.value == 0) {
-                    push('/', cur.value / l.value);
-                    if (!next.empty() && next.back().value == v &&
-                        next.back().expr == memo_expr_[v]) {
-                        return memo_expr_[v];
-                    }
-                }
-                if (checked_pow_int(cur.value, l.value, t)) {
-                    push('^', t);
-                    if (!next.empty() && next.back().value == v &&
-                        next.back().expr == memo_expr_[v]) {
-                        return memo_expr_[v];
-                    }
+                if (timed_out) {
+                    return false;
                 }
             }
         }
+        failed[cur][idx] = std::max(failed[cur][idx], rem);
+        return false;
+    };
 
-        if (next.size() > SEARCH_BEAM_WIDTH) {
-            auto score = [v](const state &s) {
-                __int128 d = (__int128)s.value - (__int128)v;
-                if (d < 0) {
-                    d = -d;
-                }
-                return std::pair<__int128, size_t>(d, s.expr.size());
-            };
-            std::nth_element(next.begin(), next.begin() + SEARCH_BEAM_WIDTH,
-                             next.end(), [&](const state &a, const state &b) {
-                                 return score(a) < score(b);
-                             });
-            next.resize(SEARCH_BEAM_WIDTH);
+    std::string result;
+    for (int depth = 1; depth <= SEARCH_MAX_TERMS && !timed_out; ++depth) {
+        for (const tok &t1 : tok9) {
+            std::string out;
+            if (dfs(t1.value, t1.last, t1.has2, depth - 1, out, t1.text)) {
+                result = out;
+                break;
+            }
+            if (timed_out) {
+                break;
+            }
         }
-
-        frontier.swap(next);
-        if (frontier.empty()) {
+        if (!result.empty()) {
             break;
         }
     }
 
-    memo_expr_[v] = "";
-    return "";
+    // Insurance: keep only a result that truly evaluates to v and is legal.
+    if (!result.empty()) {
+        int64_t check_v;
+        if (!eval_fully_paren_expr(result, check_v) || check_v != v ||
+            !is_global_alt_92_expr(result)) {
+            result.clear();
+        }
+    }
+
+    memo_expr_[v] = result;
+    return result;
 }
 
 std::string auto92::express_u64(uint64_t v, int depth) const
