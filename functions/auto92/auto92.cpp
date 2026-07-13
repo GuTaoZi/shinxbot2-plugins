@@ -577,6 +577,131 @@ void auto92::save_persisted_entry(uint64_t value, const std::string &expr) const
     }
 }
 
+void auto92::ensure_horner_digits() const
+{
+    if (horner_ready_) {
+        return;
+    }
+    struct dtok {
+        int64_t value;
+        std::string text;
+        char last;
+        bool has2;
+    };
+    std::vector<dtok> t9, t2;
+    for (int d = 1; d <= 5; ++d) {
+        for (char f : {'9', '2'}) {
+            std::string s = make_alternating_token(d, f);
+            int64_t val;
+            if (!parse_i64(s, val)) {
+                continue;
+            }
+            (f == '9' ? t9 : t2)
+                .push_back({val, s, s.back(), s.find('2') != std::string::npos});
+        }
+    }
+    const auto by_len = [](const dtok &a, const dtok &b) {
+        if (a.text.size() != b.text.size()) {
+            return a.text.size() < b.text.size();
+        }
+        return a.value < b.value;
+    };
+    std::sort(t9.begin(), t9.end(), by_len);
+    std::sort(t2.begin(), t2.end(), by_len);
+
+    const auto sub_idx = [](char last, bool has2) {
+        return (last == '2' ? 2 : 0) + (has2 ? 1 : 0);
+    };
+
+    for (int target = 0; target <= 91; ++target) {
+        std::unordered_map<int64_t, std::array<int, 4>> failed;
+        // A base-92 "digit": 9-start, 2-end alternating block equal to target.
+        std::function<bool(int64_t, char, bool, int, std::string &,
+                           const std::string &)>
+            dfs = [&](int64_t cur, char last, bool has2, int rem,
+                      std::string &out, const std::string &expr) -> bool {
+            if (cur == target && has2 && last == '2') {
+                out = expr;
+                return true;
+            }
+            if (rem <= 0) {
+                return false;
+            }
+            const int idx = sub_idx(last, has2);
+            auto it = failed.find(cur);
+            if (it != failed.end() && it->second[idx] >= rem) {
+                return false;
+            }
+            const char need = (last == '9') ? '2' : '9';
+            const std::vector<dtok> &toks = (need == '9') ? t9 : t2;
+            for (const dtok &t : toks) {
+                for (char op : {'+', '-', '*', '^', '/'}) {
+                    int64_t nv = 0;
+                    bool ok = false;
+                    switch (op) {
+                    case '+':
+                        ok = checked_add(cur, t.value, nv);
+                        break;
+                    case '-':
+                        ok = checked_sub(cur, t.value, nv);
+                        break;
+                    case '*':
+                        ok = checked_mul(cur, t.value, nv);
+                        break;
+                    case '^':
+                        ok = checked_pow_int(cur, t.value, nv);
+                        break;
+                    case '/':
+                        ok = (t.value != 0 && cur % t.value == 0);
+                        if (ok) {
+                            nv = cur / t.value;
+                        }
+                        break;
+                    default:
+                        break;
+                    }
+                    if (!ok || nv < -2'000'000 || nv > 2'000'000) {
+                        continue;
+                    }
+                    if (dfs(nv, t.last, has2 || t.has2, rem - 1, out,
+                            "(" + expr + op + t.text + ")")) {
+                        return true;
+                    }
+                }
+            }
+            failed[cur][idx] = std::max(failed[cur][idx], rem);
+            return false;
+        };
+        std::string result;
+        for (int depth = 1; depth <= 7 && result.empty(); ++depth) {
+            failed.clear();
+            for (const dtok &t1 : t9) {
+                std::string out;
+                if (dfs(t1.value, t1.last, t1.has2, depth - 1, out, t1.text)) {
+                    result = out;
+                    break;
+                }
+            }
+        }
+        horner_digits_[static_cast<size_t>(target)] = result;
+    }
+    horner_ready_ = true;
+}
+
+// Express any value in base 92 (Horner form). Each base-92 digit is a 9-start /
+// 2-end block, so the whole chain stays globally 9,2,9,2-alternating.
+std::string auto92::build_horner(uint64_t v) const
+{
+    ensure_horner_digits();
+    if (v <= 91) {
+        return horner_digits_[static_cast<size_t>(v)];
+    }
+    const uint64_t q = v / 92;
+    const uint64_t r = v % 92;
+    return "((" + build_horner(q) + "*92)+" +
+           horner_digits_[static_cast<size_t>(r)] + ")";
+}
+
 std::string auto92::express_nonneg(int64_t v) const
 {
     auto memo_it = memo_expr_.find(v);
@@ -586,8 +711,10 @@ std::string auto92::express_nonneg(int64_t v) const
 
     const int64_t abs_v = v >= 0 ? v : -v;
     if (abs_v > SEARCH_TARGET_ABS_LIMIT) {
-        memo_expr_[v] = "";
-        return "";
+        // Too large for the tiered search; use the guaranteed base-92 builder.
+        std::string big = (v >= 0) ? build_horner((uint64_t)v) : "";
+        memo_expr_[v] = big;
+        return big;
     }
 
     // Alternating 9/2 literals (short-first), split by leading digit.
@@ -726,17 +853,26 @@ std::string auto92::express_nonneg(int64_t v) const
         }
     }
 
+    // The IDDFS may run out of budget/terms; the base-92 builder always finds a
+    // (longer) legal expression, so every non-negative value is answerable.
+    if (result.empty() && v >= 0) {
+        result = build_horner((uint64_t)v);
+    }
+
     memo_expr_[v] = result;
     return result;
 }
 
 std::string auto92::express_u64(uint64_t v, int depth) const
 {
+    (void)depth;
     auto pit = persisted_expr_.find(v);
     if (pit != persisted_expr_.end() && is_global_alt_92_expr(pit->second)) {
         return pit->second;
     }
 
+    // For values within the tiered range, express_nonneg gives the clean/short
+    // form (and itself falls back to the base-92 builder if the search misses).
     if (v <= (uint64_t)LLONG_MAX) {
         std::string expr = express_nonneg((int64_t)v);
         if (!expr.empty() && is_global_alt_92_expr(expr)) {
@@ -744,85 +880,8 @@ std::string auto92::express_u64(uint64_t v, int depth) const
         }
     }
 
-    if (depth > 20) {
-        return "";
-    }
-
-    std::vector<std::pair<uint64_t, std::string>> tokens;
-    tokens.reserve(exact_token_.size());
-    for (const auto &kv : exact_token_) {
-        if (kv.first <= 1) {
-            continue;
-        }
-        uint64_t tv = (uint64_t)kv.first;
-        if (tv > v) {
-            continue;
-        }
-        tokens.push_back({tv, kv.second});
-    }
-    if (tokens.empty()) {
-        return "";
-    }
-
-    std::shuffle(tokens.begin(), tokens.end(), get_engine());
-    std::sort(tokens.begin(), tokens.end(),
-              [](const auto &a, const auto &b) { return a.first > b.first; });
-
-    size_t tries = 0;
-    for (const auto &tk : tokens) {
-        if (++tries > 48) {
-            break;
-        }
-        const uint64_t base = tk.first;
-        const std::string &tok = tk.second;
-        const uint64_t q = v / base;
-        const uint64_t r = v % base;
-        if (q == 0) {
-            continue;
-        }
-
-        if (q == 1) {
-            if (r == 0) {
-                if (is_global_alt_92_expr(tok)) {
-                    return tok;
-                }
-                continue;
-            }
-            std::string re = express_u64(r, depth + 1);
-            if (re.empty()) {
-                continue;
-            }
-            std::string cand = "(" + tok + "+" + re + ")";
-            if (is_global_alt_92_expr(cand)) {
-                return cand;
-            }
-            continue;
-        }
-
-        std::string qe = express_u64(q, depth + 1);
-        if (qe.empty()) {
-            continue;
-        }
-
-        if (r == 0) {
-            std::string cand = "(" + qe + "*" + tok + ")";
-            if (is_global_alt_92_expr(cand)) {
-                return cand;
-            }
-            continue;
-        }
-
-        std::string re = express_u64(r, depth + 1);
-        if (re.empty()) {
-            continue;
-        }
-        std::string cand = "((" + qe + "*" + tok + ")+" + re + ")";
-        if (is_global_alt_92_expr(cand)) {
-            return cand;
-        }
-    }
-
-    return "";
+    // Anything larger (up to uint64) is answered by the guaranteed builder.
+    return build_horner(v);
 }
 
 void auto92::process(std::string message, const msg_meta &conf)

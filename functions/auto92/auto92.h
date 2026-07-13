@@ -2,6 +2,7 @@
 
 #include "processable.h"
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -36,6 +37,13 @@ private:
 
     std::string express_nonneg(int64_t v) const;
     std::string express_u64(uint64_t v, int depth = 0) const;
+
+    // Guaranteed base-92 (Horner) builder: expresses ANY value as a legal (if
+    // long) alternating expression. Used when the tiered IDDFS runs out.
+    void ensure_horner_digits() const;
+    std::string build_horner(uint64_t v) const;
+    mutable std::array<std::string, 92> horner_digits_;
+    mutable bool horner_ready_ = false;
 
 public:
     auto92();
