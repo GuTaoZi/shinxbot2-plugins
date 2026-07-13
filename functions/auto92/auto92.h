@@ -41,7 +41,8 @@ private:
     // Guaranteed base-92 (Horner) builder: expresses ANY value as a legal (if
     // long) alternating expression. Used when the tiered IDDFS runs out.
     void ensure_horner_digits() const;
-    std::string build_horner(uint64_t v) const;
+    std::string build_horner(uint64_t v) const;       // top: power/token/block
+    std::string build_horner_block(uint64_t v) const;  // 9-start/2-end block
     mutable std::array<std::string, 92> horner_digits_;
     mutable bool horner_ready_ = false;
 

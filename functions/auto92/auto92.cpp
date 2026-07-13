@@ -688,18 +688,63 @@ void auto92::ensure_horner_digits() const
     horner_ready_ = true;
 }
 
-// Express any value in base 92 (Horner form). Each base-92 digit is a 9-start /
-// 2-end block, so the whole chain stays globally 9,2,9,2-alternating.
-std::string auto92::build_horner(uint64_t v) const
+// A 9-start/2-end block equal to v in base 92 (Horner). Zero digits are skipped
+// (no "+0"), and exact even-length alternating tokens are used directly.
+std::string auto92::build_horner_block(uint64_t v) const
 {
     ensure_horner_digits();
     if (v <= 91) {
         return horner_digits_[static_cast<size_t>(v)];
     }
+    if (v <= (uint64_t)LLONG_MAX) {
+        auto it = exact_token_.find((int64_t)v);
+        if (it != exact_token_.end() && !it->second.empty() &&
+            it->second.back() == '2') {
+            return it->second;
+        }
+    }
     const uint64_t q = v / 92;
     const uint64_t r = v % 92;
-    return "((" + build_horner(q) + "*92)+" +
-           horner_digits_[static_cast<size_t>(r)] + ")";
+    const std::string inner = "(" + build_horner_block(q) + "*92)";
+    if (r == 0) {
+        return inner; // skip the redundant "+0" (was "+(92-92)")
+    }
+    return "(" + inner + "+" + horner_digits_[static_cast<size_t>(r)] + ")";
+}
+
+// Express any value: prefer a clean power (t^9 / t^2) or an exact alternating
+// token, otherwise the base-92 block builder. Each base-92 digit is itself a
+// 9-start/2-end block, so the whole chain stays strictly 9,2,9,2-alternating.
+std::string auto92::build_horner(uint64_t v) const
+{
+    ensure_horner_digits();
+    // Clean power t^e, with e (2 or 9) chaining after t's last digit.
+    for (const auto &kv : exact_token_) {
+        if (kv.first < 2 || kv.second.empty()) {
+            continue;
+        }
+        const int e = (kv.second.back() == '2') ? 9 : 2;
+        unsigned __int128 p = 1;
+        bool overflow = false;
+        for (int i = 0; i < e; ++i) {
+            p *= (unsigned __int128)(uint64_t)kv.first;
+            if (p > (unsigned __int128)UINT64_MAX) {
+                overflow = true;
+                break;
+            }
+        }
+        if (!overflow && (uint64_t)p == v) {
+            return kv.second + "^" + (e == 9 ? "9" : "2");
+        }
+    }
+    // Exact alternating token (e.g. 929, 929292929).
+    if (v <= (uint64_t)LLONG_MAX) {
+        auto it = exact_token_.find((int64_t)v);
+        if (it != exact_token_.end() && !it->second.empty()) {
+            return it->second;
+        }
+    }
+    return build_horner_block(v);
 }
 
 std::string auto92::express_nonneg(int64_t v) const
