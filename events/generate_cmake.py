@@ -1,5 +1,5 @@
 pattern = """
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.12)
 
 project({CNAME})
 
@@ -23,7 +23,10 @@ include_directories("../../lib/cpp-httplib")
 include_directories("../../lib/shinxbot2-api/include")
 include_directories("../../lib/shinxbot2-api/include/meta_func")
 
-aux_source_directory(. MAIN_SOURCES)
+# CONFIGURE_DEPENDS re-checks this glob on every build and reconfigures if the
+# file set changed, so adding/removing a .cpp can't silently desync from what
+# gets linked (aux_source_directory only globs once, at initial configure).
+file(GLOB MAIN_SOURCES CONFIGURE_DEPENDS *.cpp)
 
 add_definitions( -DMAGICKCORE_QUANTUM_DEPTH=16 )
 add_definitions( -DMAGICKCORE_HDRI_ENABLE=1 )
