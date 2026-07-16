@@ -839,7 +839,13 @@ std::string bili::compact_text(const std::string &raw, size_t max_len)
     if (s.size() <= max_len) {
         return s;
     }
-    return s.substr(0, max_len) + "...";
+    size_t cut = max_len;
+    // Continuation bytes are 10xxxxxx; back off out of a character we'd
+    // otherwise split apart from its leading byte (was: mangled last glyph).
+    while (cut > 0 && (static_cast<unsigned char>(s[cut]) & 0xC0) == 0x80) {
+        --cut;
+    }
+    return s.substr(0, cut) + "...";
 }
 
 bool bili::fetch_live_snapshot(userid_t uid, up_snapshot_t &snapshot) const
@@ -1988,6 +1994,45 @@ bool bili::send_live_now_forward(groupid_t gid, const msg_meta &conf) const
     return true;
 }
 
+void bili::send_decoded_video(const std::string &out,
+                              const msg_meta &conf) const
+{
+    // Short messages (the common case: no/short 简介) stay a single plain
+    // message; only fold a long one into a merged-forward card.
+    constexpr size_t kFoldOverBytes = 400;
+    if (conf.p == nullptr || out.size() <= kFoldOverBytes) {
+        conf.p->cq_send(out, conf);
+        return;
+    }
+
+    Json::Value node(Json::objectValue);
+    Json::Value data(Json::objectValue);
+    node["type"] = "node";
+    data["name"] = "Bili";
+    data["uin"] = std::to_string(conf.p->get_botqq());
+    data["content"] = string_to_messageArr(out);
+    node["data"] = data;
+    Json::Value messages(Json::arrayValue);
+    messages.append(node);
+
+    Json::Value req(Json::objectValue);
+    std::string endpoint;
+    if (conf.message_type == "group") {
+        req["group_id"] = Json::UInt64(conf.group_id);
+        endpoint = "send_group_forward_msg";
+    }
+    else {
+        req["user_id"] = Json::UInt64(conf.user_id);
+        endpoint = "send_private_forward_msg";
+    }
+    req["messages"] = messages;
+    const std::string resp = conf.p->cq_send(endpoint, req);
+    const Json::Value root = string_to_json(resp);
+    if (root.isObject() && root.get("status", "ok").asString() == "failed") {
+        conf.p->cq_send(out, conf); // fallback to plain
+    }
+}
+
 void bili::process(std::string message, const msg_meta &conf)
 {
     const std::string raw = trim(message);
@@ -2002,7 +2047,7 @@ void bili::process(std::string message, const msg_meta &conf)
         if (has_video_token_for_decode(raw)) {
             const std::string out = bili_decode::decode_video_text(raw);
             if (!out.empty()) {
-                conf.p->cq_send(out, conf);
+                send_decoded_video(out, conf);
             }
         }
         return;
@@ -2396,7 +2441,7 @@ void bili::process(std::string message, const msg_meta &conf)
                                  conf);
                  return true;
              }
-             conf.p->cq_send(out, conf);
+             send_decoded_video(out, conf);
              return true;
          }},
         {"wouldpush",

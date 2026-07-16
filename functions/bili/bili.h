@@ -143,6 +143,10 @@ private:
     bool send_list_group_subscriptions_forward(groupid_t gid,
                                                const msg_meta &conf) const;
     bool send_live_now_forward(groupid_t gid, const msg_meta &conf) const;
+    // Sends a bili_decode video-info message: inline if short, else folded
+    // into a merged-forward (group or private) so a long 简介 doesn't spam
+    // the chat with a giant single message.
+    void send_decoded_video(const std::string &out, const msg_meta &conf) const;
 
     void handle_poll(bot *p);
 

@@ -35,13 +35,47 @@ bool extract_aid(const std::string &s, std::string &aid)
     return false;
 }
 
+// Truncate to at most max_len bytes without splitting a multi-byte UTF-8
+// character in half (which renders as a mangled/incorrect trailing glyph).
 std::string compact_text(const std::string &raw, size_t max_len)
 {
     std::string s = trim(raw);
     if (s.size() <= max_len) {
         return s;
     }
-    return s.substr(0, max_len) + "...";
+    size_t cut = max_len;
+    // Continuation bytes are 10xxxxxx; back off out of a character we'd
+    // otherwise split apart from its leading byte.
+    while (cut > 0 &&
+           (static_cast<unsigned char>(s[cut]) & 0xC0) == 0x80) {
+        --cut;
+    }
+    return s.substr(0, cut) + "...";
+}
+
+// Escape CQ-code specials so untrusted text (video title/desc/uploader name
+// are attacker-controlled) can't be misparsed as CQ code syntax, whether sent
+// flat or wrapped into a forward node via string_to_messageArr.
+std::string cq_escape(const std::string &s)
+{
+    std::string o;
+    o.reserve(s.size());
+    for (char c : s) {
+        switch (c) {
+        case '&':
+            o += "&amp;";
+            break;
+        case '[':
+            o += "&#91;";
+            break;
+        case ']':
+            o += "&#93;";
+            break;
+        default:
+            o.push_back(c);
+        }
+    }
+    return o;
 }
 
 } // namespace
@@ -84,13 +118,15 @@ std::string decode_video_text(const std::string &input_text)
         oss << "[CQ:image,file=" << pic << ",id=40000]";
     }
     oss << out_bvid << " 分区: " << data.get("tname", "").asString() << "\n";
-    oss << "标题: " << compact_text(data.get("title", "").asString(), 120)
+    oss << "标题: "
+        << cq_escape(compact_text(data.get("title", "").asString(), 120))
         << "\n";
     const std::string desc = data.get("desc", "").asString();
     if (!desc.empty()) {
-        oss << "简介: " << compact_text(desc, 260) << "\n";
+        oss << "简介: " << cq_escape(compact_text(desc, 260)) << "\n";
     }
-    oss << "UP: " << data["owner"].get("name", "").asString() << "\n";
+    oss << "UP: " << cq_escape(data["owner"].get("name", "").asString())
+        << "\n";
     oss << "播放 " << to_human_string(data["stat"].get("view", 0).asInt64())
         << " 点赞 " << to_human_string(data["stat"].get("like", 0).asInt64())
         << " 回复 " << to_human_string(data["stat"].get("reply", 0).asInt64())
