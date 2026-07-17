@@ -1,6 +1,8 @@
 #include "nonogram.h"
 #include "utils.h"
 
+#include "../../lib/help_utils.h"
+
 #include <cctype>
 #include <mutex>
 #include <sstream>
@@ -49,17 +51,6 @@ static bool is_nonogram_command_message(const std::string &message)
     return starts_with(body, "*nonogram");
 }
 
-static help_level_t resolve_help_level(const msg_meta &conf)
-{
-    if (conf.p->is_op(conf.user_id)) {
-        return help_level_t::bot_admin;
-    }
-    if (conf.message_type == "group" &&
-        is_group_op(conf.p, conf.group_id, conf.user_id)) {
-        return help_level_t::group_admin;
-    }
-    return help_level_t::public_only;
-}
 
 void nonogram::load()
 {

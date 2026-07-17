@@ -2,6 +2,8 @@
 
 #include "utils.h"
 
+#include "../../lib/help_utils.h"
+
 #include <Magick++.h>
 
 #include <algorithm>
@@ -992,12 +994,7 @@ void rua::process(std::string message, const msg_meta &conf)
     const std::vector<cmd_exact_rule> exact_rules = {
         {CMD_HELP,
          [&]() {
-             help_level_t lv = help_level_t::public_only;
-             if (admin) {
-                 lv = conf.p->is_op(conf.user_id) ? help_level_t::bot_admin
-                                                  : help_level_t::group_admin;
-             }
-             conf.p->cq_send(rua_detail_help(lv), conf);
+             conf.p->cq_send(rua_detail_help(resolve_help_level(conf)), conf);
              return true;
          }},
         {CMD_RELOAD,

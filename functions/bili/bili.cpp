@@ -4,6 +4,8 @@
 #include "bili_http.h"
 #include "bili_utils.h"
 
+#include "../../lib/help_utils.h"
+
 #include <algorithm>
 #include <ctime>
 #include <fmt/format.h>
@@ -54,18 +56,6 @@ bool has_video_token_for_decode(const std::string &s)
     static const std::regex av_re("\\bav([0-9]{1,20})\\b",
                                   std::regex_constants::icase);
     return std::regex_search(s, bv_re) || std::regex_search(s, av_re);
-}
-
-help_level_t resolve_help_level(const msg_meta &conf)
-{
-    if (conf.p != nullptr && conf.p->is_op(conf.user_id)) {
-        return help_level_t::bot_admin;
-    }
-    if (conf.message_type == "group" && conf.p != nullptr &&
-        is_group_op(conf.p, conf.group_id, conf.user_id)) {
-        return help_level_t::group_admin;
-    }
-    return help_level_t::public_only;
 }
 
 std::string build_help_text(help_level_t level, bool in_group,
