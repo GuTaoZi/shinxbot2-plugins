@@ -75,10 +75,16 @@ private:
     void send_lines(const msg_meta &conf, const std::string &title,
                     const std::vector<std::string> &lines);
 
+    // Full on-demand usage (hist help / hist.help / bare "hist"), gated by
+    // permission level: admin-only commands only appear for group_admin/bot_admin.
+    static std::string detailed_help(help_level_t level);
+
 public:
     hist();
     void process(std::string message, const msg_meta &conf) override;
     bool check(std::string message, const msg_meta &conf) override;
+    // Brief one-liner only — this is what feeds the aggregated bot.help list.
+    // Detailed usage lives in detailed_help(), reachable via "hist help".
     std::string help() override;
     bool reload(const msg_meta &conf) override;
 };

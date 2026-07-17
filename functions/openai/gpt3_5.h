@@ -49,6 +49,10 @@ private:
     int arc_check_counter = 0;
     bool arc_is_full = false;
 
+    // Full on-demand usage (.ai.help), gated by permission level: OP-only
+    // commands (.ai.sw) only appear for bot_admin.
+    static std::string detailed_help(help_level_t level);
+
 public:
     gpt3_5();
     size_t get_avaliable_key();

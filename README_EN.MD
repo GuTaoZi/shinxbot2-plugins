@@ -40,3 +40,18 @@ Before running the bot, ensure that the dynamic libraries for functions are plac
 When the bot loads a library, it will call `extern "C" processable *create()` to obtain the function pointer. Generally, just returning `new YourFunc()` is sufficient.
 
 When the bot unloads a library, it will call `extern "C" processable *close(processable* p)` to indicate that the library needs to be unloaded. Please properly release all globally `new` obtained pointers, including the parameter `p`.
+
+### Help text convention
+
+`help()` (no args) feeds the aggregated `bot.help` list — it **must be a single brief line** (module name +
+one sentence + a pointer to the detailed-help command, e.g.
+`"Celeste goldberries query (goldberries.net). Detailed help: gold help"`). Every module's `help()` gets
+concatenated back-to-back into one `bot.help` message; a module returning a full usage dump there makes that
+message balloon (celeste/hist/openai all did this — fixed).
+
+Detailed usage belongs in the module's own on-demand command (e.g. `gold help` / `gold.help` /
+`*nonogram.help`) — any length is fine there, and it can vary by permission via `help(conf, level)`
+(`help_level_t`: `public_only` / `group_admin` / `bot_admin`) to show admin-only commands only to admins.
+Prefer reusing `resolve_help_level(conf)` from `plugins/lib/help_utils.h` for that permission check (it
+matches the framework's own `bot.help` aggregator rule: `bot_admin` requires private chat + op,
+`group_admin` requires group chat + group admin) instead of re-deriving it per plugin.

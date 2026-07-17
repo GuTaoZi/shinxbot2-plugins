@@ -1,6 +1,8 @@
 #include "gpt3_5.h"
 #include "utils.h"
 
+#include "../../lib/help_utils.h"
+
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -607,6 +609,11 @@ void gpt3_5::process(std::string message, const msg_meta &conf)
     }
 
     const std::vector<cmd_exact_rule> exact_rules = {
+        {".help",
+         [&]() {
+             conf.p->cq_send(detailed_help(resolve_help_level(conf)), conf);
+             return true;
+         }},
         {".test",
          [&]() {
              conf.p->cq_send(message, conf);
@@ -1040,18 +1047,27 @@ bool gpt3_5::check(std::string message, const msg_meta &conf)
 
 std::string gpt3_5::help()
 {
-    return "OpenAI GPT-3.5：使用 .ai [内容] 开始对话\n"
-           "指令列表：\n"
-           ".ai.reset - 重置当前对话上下文\n"
-           ".ai.status - 查看当前实际生效的模型/阈值/历史长度估算\n"
-           ".ai.compress - 压缩旧上下文并保留最近对话\n"
-           ".ai.change [模式] - 切换提示词模式\n"
-           ".ai.arc - 手动归档当前上下文\n"
-           ".ai.arc list [页码] - 查看归档列表（每页5条）\n"
-           ".ai.arc restore [编号/文件名] - 从归档中恢复上下文\n"
-           ".ai.sw - 仅 OP 可用, 关闭模型作维护用\n"
-           ".ai.set reply/token/red/compress [数值] - 修改 MAX_REPLY/MAX_TOKEN/RED_LINE/compress_recent_rounds\n"
-           "权限说明：归档与恢复功能在群聊中需 OP权限，私聊可直接使用。";
+    return "OpenAI GPT-3.5：使用 .ai [内容] 开始对话。详细帮助: .ai.help";
+}
+
+std::string gpt3_5::detailed_help(help_level_t level)
+{
+    std::string s = "OpenAI GPT-3.5：使用 .ai [内容] 开始对话\n"
+                    "指令列表：\n"
+                    ".ai.reset - 重置当前对话上下文\n"
+                    ".ai.status - 查看当前实际生效的模型/阈值/历史长度估算\n"
+                    ".ai.compress - 压缩旧上下文并保留最近对话\n"
+                    ".ai.change [模式] - 切换提示词模式\n"
+                    ".ai.arc - 手动归档当前上下文\n"
+                    ".ai.arc list [页码] - 查看归档列表（每页5条）\n"
+                    ".ai.arc restore [编号/文件名] - 从归档中恢复上下文\n"
+                    ".ai.set reply/token/red/compress [数值] - 修改 "
+                    "MAX_REPLY/MAX_TOKEN/RED_LINE/compress_recent_rounds\n"
+                    "权限说明：归档与恢复功能在群聊中需 OP权限，私聊可直接使用。";
+    if (level == help_level_t::bot_admin) {
+        s += "\n[OP] .ai.sw - 关闭模型作维护用";
+    }
+    return s;
 }
 
 uintmax_t gpt3_5::get_archives_total_size()

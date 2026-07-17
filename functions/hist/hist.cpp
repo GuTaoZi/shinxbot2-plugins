@@ -1,6 +1,8 @@
 #include "hist.h"
 #include "utils.h"
 
+#include "../../lib/help_utils.h"
+
 #include <algorithm>
 #include <cctype>
 #include <curl/curl.h>
@@ -791,7 +793,7 @@ void hist::process(std::string message, const msg_meta &conf)
     }
     std::string rest = (m.size() > 4) ? trim(m.substr(4)) : "";
     if (rest.empty() || rest == "help") {
-        cq_send(conf.p, help(), conf);
+        cq_send(conf.p, detailed_help(resolve_help_level(conf)), conf);
         return;
     }
     if (rest[0] == '?') {
@@ -816,7 +818,7 @@ void hist::process(std::string message, const msg_meta &conf)
         cmd_set(arg, conf);
     }
     else if (tl == "help") {
-        cq_send(conf.p, help(), conf);
+        cq_send(conf.p, detailed_help(resolve_help_level(conf)), conf);
     }
     else if (tier_st >= 0) {
         // "五星上" / "5星" / "一星下" -> tier listing (上/下 = upper/lower)
@@ -829,15 +831,24 @@ void hist::process(std::string message, const msg_meta &conf)
 
 std::string hist::help()
 {
-    return "CN Hist 查询:\nhttps://bbs.celemiao.com/hist\n"
-           "hist map <关键词> - 查地图难度+最近通关者\n"
-           "hist player <名字> - 查玩家统计+最近通关\n"
-           "hist <数>星[上|下] - 列出该难度地图 (如 hist 五星上, hist 1星下)\n"
-           "hist ? <模糊词> - 搜索候选地图/玩家\n"
-           "hist alias add <别名> = <地图> / del / list - 别名(管理)\n"
-           "hist set recent <n> - 本群显示条数(管理)\n"
-           "hist <关键词> - 等同 hist map\n"
-           "查更多记录: 名字后加数字, 如 hist player Kuro 10 (或 10条)";
+    return "CN Hist 查询 (bbs.celemiao.com/hist)。详细帮助: hist help";
+}
+
+std::string hist::detailed_help(help_level_t level)
+{
+    std::string s = "CN Hist 查询:\nhttps://bbs.celemiao.com/hist\n"
+                    "hist map <关键词> - 查地图难度+最近通关者\n"
+                    "hist player <名字> - 查玩家统计+最近通关\n"
+                    "hist <数>星[上|下] - 列出该难度地图 (如 hist 五星上, hist 1星下)\n"
+                    "hist ? <模糊词> - 搜索候选地图/玩家\n"
+                    "hist alias list - 查看别名列表\n"
+                    "hist <关键词> - 等同 hist map\n"
+                    "查更多记录: 名字后加数字, 如 hist player Kuro 10 (或 10条)";
+    if (level != help_level_t::public_only) {
+        s += "\n[管理] hist alias add <别名> = <地图> / del <别名> - 别名管理\n"
+             "[管理] hist set recent <n> - 本群显示条数";
+    }
+    return s;
 }
 
 bool hist::reload(const msg_meta &conf)

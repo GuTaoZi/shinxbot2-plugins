@@ -1,6 +1,8 @@
 #include "celeste.h"
 #include "utils.h"
 
+#include "../../lib/help_utils.h"
+
 #include <algorithm>
 #include <cctype>
 #include <curl/curl.h>
@@ -810,7 +812,7 @@ void celeste::process(std::string message, const msg_meta &conf)
     }
     std::string rest = (m.size() > 4) ? trim(m.substr(4)) : "";
     if (rest.empty() || rest == "help") {
-        cq_send(conf.p, help(), conf);
+        cq_send(conf.p, detailed_help(resolve_help_level(conf)), conf);
         return;
     }
     if (rest[0] == '?') {
@@ -836,7 +838,7 @@ void celeste::process(std::string message, const msg_meta &conf)
         cmd_set(arg, conf);
     }
     else if (tl == "help") {
-        cq_send(conf.p, help(), conf);
+        cq_send(conf.p, detailed_help(resolve_help_level(conf)), conf);
     }
     else if (tl.size() >= 2 && tl[0] == 't' &&
              (std::isdigit(static_cast<unsigned char>(tl[1])) || tl == "tu" ||
@@ -850,16 +852,24 @@ void celeste::process(std::string message, const msg_meta &conf)
 
 std::string celeste::help()
 {
-    return "Celeste 金草莓外榜查询:\nhttps://goldberries.net\n"
-           "gold map <关键词> - 查地图难度+最近通关者\n"
-           "gold player <名字> - 查玩家+最近金草记录\n"
-           "gold ? <模糊词> - 搜索候选地图/玩家\n"
-           "gold t<档位> - 列出该档位地图 (如 gold t17, gold tu=未定级)\n"
-           "gold ? <模糊词> - 搜索候选\n"
-           "gold alias add <别名> = <地图> / del / list - 别名(管理)\n"
-           "gold set recent <n> - 本群显示条数(管理)\n"
-           "gold <关键词> - 等同 gold map\n"
-           "查更多记录: 名字后加数字, 如 gold player viddie 10 (或 10条)";
+    return "Celeste 金草莓外榜查询 (goldberries.net)。详细帮助: gold help";
+}
+
+std::string celeste::detailed_help(help_level_t level)
+{
+    std::string s = "Celeste 金草莓外榜查询:\nhttps://goldberries.net\n"
+                    "gold map <关键词> - 查地图难度+最近通关者\n"
+                    "gold player <名字> - 查玩家+最近金草记录\n"
+                    "gold ? <模糊词> - 搜索候选地图/玩家\n"
+                    "gold t<档位> - 列出该档位地图 (如 gold t17, gold tu=未定级)\n"
+                    "gold alias list - 查看别名列表\n"
+                    "gold <关键词> - 等同 gold map\n"
+                    "查更多记录: 名字后加数字, 如 gold player viddie 10 (或 10条)";
+    if (level != help_level_t::public_only) {
+        s += "\n[管理] gold alias add <别名> = <地图> / del <别名> - 别名管理\n"
+             "[管理] gold set recent <n> - 本群显示条数";
+    }
+    return s;
 }
 
 bool celeste::reload(const msg_meta &conf)

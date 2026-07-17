@@ -66,6 +66,18 @@
 
 当机器人卸载一个库时，会调用 `extern "C" processable *close(processable* p)` 来表明该库需要被卸载。请正确释放所有通过 `new` 获得的全局指针，包括参数 `p`。
 
+### 帮助文本约定
+
+`help()`（无参数）是 `bot.help` 聚合列表用的——**必须是一行简介**（模块名 + 一句话 + 指向详细帮助命令，如
+`"Celeste 金草莓外榜查询 (goldberries.net)。详细帮助: gold help"`）。所有模块的 `help()` 会在同一条
+`bot.help` 消息里首尾相连拼接，一个模块塞进整段详细用法会把这条消息拖得很长（celeste/hist/openai 三个
+模块都曾这样，已修复）。
+
+详细用法应放在模块自己的按需命令里（如 `gold help` / `gold.help` / `*nonogram.help`），可以是任意长度，
+按需要通过 `help(conf, level)`（`help_level_t`：`public_only` / `group_admin` / `bot_admin`）区分管理员可见
+的内容。权限判定请优先复用 `plugins/lib/help_utils.h` 里的 `resolve_help_level(conf)`（与框架
+`bot.help` 聚合器的判定规则保持一致：`bot_admin` 需要私聊+op，`group_admin` 需要群聊+群管理），不要自
+己重新实现一遍。
 
 TODO：
 
