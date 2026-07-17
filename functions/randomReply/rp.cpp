@@ -2,6 +2,8 @@
 
 #include "utils.h"
 
+#include "../../lib/help_utils.h"
+
 #include <sstream>
 
 static std::string config_path =
@@ -63,6 +65,11 @@ void RP::process(std::string message, const msg_meta &conf)
     args = trim(args);
 
     const std::vector<cmd_exact_rule> exact_rules = {
+        {"rp.help",
+         [&]() {
+             conf.p->cq_send(detailed_help(resolve_help_level(conf)), conf);
+             return true;
+         }},
         {"rp.del",
          [&]() {
              if (!can_manage) {
@@ -169,24 +176,21 @@ void RP::process(std::string message, const msg_meta &conf)
 
 std::string RP::help()
 {
-    return "Automatic Reply Bot:\n"
-           "- Replies are triggered automatically when a message is received "
-           "from the specified user.";
+    return "Automatic Reply Bot: auto-replies to specific users. Help: rp.help";
 }
 
-std::string RP::help(const msg_meta &conf, help_level_t level)
+std::string RP::detailed_help(help_level_t level)
 {
-    if (level == help_level_t::group_admin && conf.message_type == "group" &&
-        is_group_op(conf.p, conf.group_id, conf.user_id)) {
-        return "Automatic Reply Bot:\n"
-               "- Add a reply: rp.add <userid> <possibility in %> <message>\n"
-               "- Delete a reply: rp.del <userid>\n"
-               "- List replies: rp.list\n"
-               "- Replies are triggered automatically when a message is "
-               "received from the specified user.";
+    std::string s =
+        "Automatic Reply Bot:\n"
+        "- Replies are triggered automatically when a message is received "
+        "from the specified user.";
+    if (level != help_level_t::public_only) {
+        s += "\n[admin] Add a reply: rp.add <userid> <possibility in %> <message>\n"
+             "[admin] Delete a reply: rp.del <userid>\n"
+             "[admin] List replies: rp.list";
     }
-
-    return help();
+    return s;
 }
 
 DECLARE_FACTORY_FUNCTIONS(RP)

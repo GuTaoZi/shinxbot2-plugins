@@ -46,15 +46,21 @@ private:
     mutable std::array<std::string, 92> horner_digits_;
     mutable bool horner_ready_ = false;
 
+    // Full on-demand usage (*92.help), gated by permission level: OP-only
+    // commands (rebuild/clear_cache/precompute) only appear for bot_admin.
+    static std::string detailed_help(help_level_t level);
+
 public:
     auto92();
 
     void process(std::string message, const msg_meta &conf) override;
     bool check(std::string message, const msg_meta &conf) override;
 
+    // Brief one-liner only — this is what feeds the aggregated bot.help list
+    // (the default help(conf, level) below just forwards to this, unchanged
+    // by permission level). Detailed usage lives in detailed_help(), reachable
+    // via *92.help.
     std::string help() override;
-    std::string help(const msg_meta &conf,
-                     help_level_t level = help_level_t::public_only) override;
 };
 
 DECLARE_FACTORY_FUNCTIONS_HEADER

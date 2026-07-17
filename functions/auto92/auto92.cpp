@@ -935,8 +935,8 @@ void auto92::process(std::string message, const msg_meta &conf)
     const bool is_op_user = conf.p->is_op(conf.user_id);
 
     const auto handle_help = [&]() {
-        conf.p->cq_send(help(conf, is_op_user ? help_level_t::bot_admin
-                                              : help_level_t::public_only),
+        conf.p->cq_send(detailed_help(is_op_user ? help_level_t::bot_admin
+                                                 : help_level_t::public_only),
                         conf);
         return true;
     };
@@ -1121,18 +1121,15 @@ std::string auto92::help()
     return "92论证器：*92 <数字>（支持 uint64，严格9/2交替表达）";
 }
 
-std::string auto92::help(const msg_meta &conf, help_level_t level)
+std::string auto92::detailed_help(help_level_t level)
 {
-    (void)conf;
+    std::string s = "92论证器\n*92 <数字>\n*92.help";
     if (level == help_level_t::bot_admin) {
-        return "92论证器\n"
-               "*92 <数字>\n"
-               "*92.help\n"
-               "*92.rebuild (OP) 重建token缓存\n"
-               "*92.clear_cache (OP) 清空所有缓存\n"
-               "*92.precompute 1000|10000 (OP) 预热表达式缓存";
+        s += "\n[OP] *92.rebuild 重建token缓存\n"
+             "[OP] *92.clear_cache 清空所有缓存\n"
+             "[OP] *92.precompute 1000|10000 预热表达式缓存";
     }
-    return "92论证器\n*92 <数字>\n*92.help";
+    return s;
 }
 
 DECLARE_FACTORY_FUNCTIONS(auto92)
