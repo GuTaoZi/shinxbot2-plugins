@@ -2,10 +2,24 @@
 #include "utils.h"
 
 #include <chrono>
+#include <ctime>
+#include <iomanip>
 #include <map>
+#include <sstream>
 #include <thread>
 
 namespace {
+
+const char *HITOKOTO_STATE_PATH = "features/poke/poke_state.json";
+
+std::string today_date_string()
+{
+    std::time_t now = std::time(nullptr);
+    std::tm local_tm = *std::localtime(&now);
+    std::ostringstream oss;
+    oss << std::put_time(&local_tm, "%Y-%m-%d");
+    return oss.str();
+}
 
 std::string build_hitokoto_message(const Json::Value &root)
 {
@@ -90,6 +104,47 @@ poke::poke()
     parse_json_to_set(J["users"], no_poke_users);
     parse_json_to_set(J["groups"], no_poke_groups);
     minInterval = std::chrono::seconds(3);
+    load_hitokoto_state();
+}
+
+void poke::load_hitokoto_state()
+{
+    hitokoto_date_ = today_date_string();
+    hitokoto_users_today_.clear();
+    Json::Value J = string_to_json(
+        readfile(bot_config_path(nullptr, HITOKOTO_STATE_PATH), "{}"));
+    if (!J.isObject() || J.get("date", "").asString() != hitokoto_date_) {
+        return;
+    }
+    parse_json_to_set(J["users"], hitokoto_users_today_);
+}
+
+void poke::save_hitokoto_state() const
+{
+    Json::Value J(Json::objectValue);
+    J["date"] = hitokoto_date_;
+    Json::Value users(Json::arrayValue);
+    for (userid_t u : hitokoto_users_today_) {
+        users.append(Json::UInt64(u));
+    }
+    J["users"] = users;
+    writefile(bot_config_path(nullptr, HITOKOTO_STATE_PATH),
+              J.toStyledString(), false);
+}
+
+// True (and records the user) if they haven't had today's hitokoto yet.
+bool poke::take_daily_hitokoto(userid_t user_id)
+{
+    const std::string today = today_date_string();
+    if (hitokoto_date_ != today) {
+        hitokoto_date_ = today;
+        hitokoto_users_today_.clear();
+    }
+    if (!hitokoto_users_today_.insert(user_id).second) {
+        return false;
+    }
+    save_hitokoto_state();
+    return true;
 }
 
 void poke::process(bot *p, Json::Value J)
@@ -116,8 +171,10 @@ void poke::process(bot *p, Json::Value J)
     Jx["user_id"] = Json::UInt64(user_id);
     p->cq_send("group_poke", Jx);
 
-    const int likes_sent = send_likes_back(p, user_id, 20);
-    if (likes_sent == 0) {
+    // Likes are a bonus: they fail for users whose privacy settings block
+    // them, and after QQ's per-day cap — neither should cost the hitokoto.
+    send_likes_back(p, user_id, 20);
+    if (!take_daily_hitokoto(user_id)) {
         return;
     }
     const std::string hitokoto = fetch_hitokoto_with_retry();
