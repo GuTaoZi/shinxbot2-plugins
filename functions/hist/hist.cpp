@@ -5,10 +5,12 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <curl/curl.h>
 #include <fmt/format.h>
 #include <mutex>
 #include <sstream>
+#include <thread>
 
 namespace {
 const std::string kConfig = "features/hist/hist.json";
@@ -243,20 +245,41 @@ std::string hist::http_get(const std::string &url)
     if (h == nullptr) {
         return "";
     }
-    curl_easy_reset(h);
-    std::string out;
-    curl_easy_setopt(h, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(h, CURLOPT_TIMEOUT, 25L);
-    curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT, 10L);
-    curl_easy_setopt(h, CURLOPT_ACCEPT_ENCODING, "");
-    curl_easy_setopt(h, CURLOPT_USERAGENT, "shinxbot-hist/1.0");
-    curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(h, CURLOPT_WRITEDATA, &out);
-    if (curl_easy_perform(h) != CURLE_OK) {
-        return "";
+    // The site is hosted in China and the bot may run in the US, so transient
+    // timeouts/resets happen: retry with backoff, and log why each try failed.
+    constexpr int kAttempts = 3;
+    for (int attempt = 1; attempt <= kAttempts; ++attempt) {
+        curl_easy_reset(h);
+        std::string out;
+        curl_easy_setopt(h, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(h, CURLOPT_FAILONERROR, 1L);
+        curl_easy_setopt(h, CURLOPT_TIMEOUT, 25L);
+        curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT, 10L);
+        curl_easy_setopt(h, CURLOPT_ACCEPT_ENCODING, "");
+        curl_easy_setopt(h, CURLOPT_USERAGENT, "shinxbot-hist/1.0");
+        curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, write_cb);
+        curl_easy_setopt(h, CURLOPT_WRITEDATA, &out);
+        const CURLcode rc = curl_easy_perform(h);
+        if (rc == CURLE_OK) {
+            return out;
+        }
+        long status = 0;
+        curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &status);
+        // 4xx won't change on retry (e.g. a removed player/map).
+        const bool retryable = !(status >= 400 && status < 500);
+        const bool last = attempt == kAttempts || !retryable;
+        set_global_log(last ? LOG::ERROR : LOG::WARNING,
+                       fmt::format("hist: GET {} failed (try {}/{}): {}{}", url,
+                                   attempt, kAttempts, curl_easy_strerror(rc),
+                                   status ? fmt::format(" [HTTP {}]", status)
+                                          : ""));
+        if (last) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(attempt));
     }
-    return out;
+    return "";
 }
 
 std::string hist::normalize(const std::string &s)
@@ -289,7 +312,18 @@ bool hist::ensure_cache()
     if (!maps_.empty() && now - cache_ts_ < cache_ttl_sec_) {
         return true;
     }
-    return fetch_and_build_unlocked();
+    if (fetch_and_build_unlocked()) {
+        return true;
+    }
+    if (!maps_.empty()) {
+        // Refresh failed but we still hold the last good snapshot: serve it
+        // rather than failing the query, and retry the refresh in 5 min
+        // instead of making every query sit through the retries.
+        set_global_log(LOG::WARNING, "hist: refresh failed, serving stale cache");
+        cache_ts_ = now - cache_ttl_sec_ + 300;
+        return true;
+    }
+    return false;
 }
 
 bool hist::fetch_and_build_unlocked()
@@ -299,11 +333,13 @@ bool hist::fetch_and_build_unlocked()
         return false;
     }
 
-    maps_.clear();
-    map_name_idx_.clear();
-    star_maps_.clear();
-    players_.clear();
-    player_name_idx_.clear();
+    // Build into locals and swap in only once every page has arrived, so a
+    // failed player page can't leave a half-empty cache marked fresh for an hour.
+    std::unordered_map<int, MapInfo> maps;
+    std::vector<std::pair<std::string, int>> map_name_idx;
+    std::map<int, std::vector<int>> star_maps;
+    std::unordered_map<int, PlayerInfo> players;
+    std::vector<std::pair<std::string, int>> player_name_idx;
 
     for (const auto &m : mroot["maps"]) {
         MapInfo mi;
@@ -318,19 +354,25 @@ bool hist::fetch_and_build_unlocked()
         if (mi.id == 0) {
             continue;
         }
-        maps_[mi.id] = mi;
-        map_name_idx_.emplace_back(normalize(mi.name), mi.id);
-        star_maps_[mi.stars].push_back(mi.id);
+        maps[mi.id] = mi;
+        map_name_idx.emplace_back(normalize(mi.name), mi.id);
+        star_maps[mi.stars].push_back(mi.id);
     }
 
     // Players are paginated; pull every page so lookups + ranking run locally.
-    Json::Value p1 = string_to_json(http_get(base_url_ + "/api/hist/players?page=1"));
-    const int total_pages = p1["pagination"].get("totalPages", 1).asInt();
+    int total_pages = 1;
     for (int page = 1; page <= total_pages; ++page) {
-        const Json::Value &pr =
-            (page == 1) ? p1
-                        : string_to_json(http_get(
-                              base_url_ + fmt::format("/api/hist/players?page={}", page)));
+        const Json::Value pr = string_to_json(
+            http_get(base_url_ + fmt::format("/api/hist/players?page={}", page)));
+        if (!pr.isObject() || !pr["players"].isArray()) {
+            set_global_log(LOG::ERROR,
+                           fmt::format("hist: players page {} unusable, keeping old cache",
+                                       page));
+            return false;
+        }
+        if (page == 1) {
+            total_pages = pr["pagination"].get("totalPages", 1).asInt();
+        }
         for (const auto &p : pr["players"]) {
             PlayerInfo pi;
             pi.id = p.get("id", 0).asInt();
@@ -341,11 +383,16 @@ bool hist::fetch_and_build_unlocked()
             if (pi.id == 0) {
                 continue;
             }
-            players_[pi.id] = pi;
-            player_name_idx_.emplace_back(normalize(pi.username), pi.id);
+            players[pi.id] = pi;
+            player_name_idx.emplace_back(normalize(pi.username), pi.id);
         }
     }
 
+    maps_ = std::move(maps);
+    map_name_idx_ = std::move(map_name_idx);
+    star_maps_ = std::move(star_maps);
+    players_ = std::move(players);
+    player_name_idx_ = std::move(player_name_idx);
     cache_ts_ = std::time(nullptr);
     return true;
 }
