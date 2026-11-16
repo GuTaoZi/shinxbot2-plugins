@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bili_card.h"
 #include "processable.h"
 
 #include <atomic>
@@ -55,6 +56,7 @@ private:
         std::string video_title;
         std::string video_cover;
         int64_t video_pub_ts = 0;
+        int video_duration = 0; // seconds, 0 = unknown (badge on the push picture)
         std::string video_reason;
 
         bool has_live = false;
@@ -135,6 +137,11 @@ private:
                                            const up_snapshot_t &snap) const;
     std::string build_live_off_push_message(userid_t uid,
                                             const up_snapshot_t &snap) const;
+    // 2026-11-16 (user): the push as one message, the drawn picture (bili_card: cover, type tag, big title,
+    // avatar/name/time, QR) with a "你关注的X开播啦：[标题]" chat-list summary, then " <link>". Falls back to the
+    // text builders above if the picture can't be drawn. Draws a new picture on every call.
+    std::string build_push(bot *p, userid_t uid, const up_snapshot_t &snap,
+                           bili_card::kind_t kind) const;
 
     std::string query_one(userid_t uid) const;
     std::string list_group_subscriptions(groupid_t gid) const;
@@ -147,6 +154,9 @@ private:
     // into a merged-forward (group or private) so a long 简介 doesn't spam
     // the chat with a giant single message.
     void send_decoded_video(const std::string &out, const msg_meta &conf) const;
+    // 2026-11-16 (user): answer a BV/av code with the video-info picture (bili_card video_info) + " <link>";
+    // falls back to decode_video_text + send_decoded_video. Returns false if nothing could be decoded.
+    bool send_video_info(const std::string &text, const msg_meta &conf) const;
 
     void handle_poll(bot *p);
 

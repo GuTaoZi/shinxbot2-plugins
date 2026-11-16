@@ -3,6 +3,8 @@
 #include "bili_http.h"
 #include "utils.h"
 
+#include <algorithm>
+#include <curl/curl.h>
 #include <regex>
 #include <sstream>
 #include <string>
@@ -33,6 +35,58 @@ bool extract_aid(const std::string &s, std::string &aid)
         return true;
     }
     return false;
+}
+
+// b23.tv / bili2233.cn short link, typed or JSON-escaped inside a shared card ("b23.tv\/QUdD66W").
+bool extract_short_code(const std::string &s, std::string &host, std::string &code)
+{
+    static const std::regex re(R"((b23\.tv|bili2233\.cn)\\?/([0-9A-Za-z]{4,16}))",
+                               std::regex_constants::icase);
+    std::smatch m;
+    if (!std::regex_search(s, m, re)) {
+        return false;
+    }
+    host = m.str(1);
+    code = m.str(2);
+    return true;
+}
+
+size_t discard_body(char *, size_t size, size_t nmemb, void *) { return size * nmemb; }
+
+// Where the short link redirects to (one request, redirect not followed); "" on failure.
+std::string resolve_short_link(const std::string &host, const std::string &code)
+{
+    CURL *c = curl_easy_init();
+    if (!c) {
+        return "";
+    }
+    const std::string url = "https://" + host + "/" + code;
+    curl_easy_setopt(c, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 0L);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, 8L);
+    curl_easy_setopt(c, CURLOPT_USERAGENT, "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/140 Safari/537.36");
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, discard_body);
+    std::string target;
+    if (curl_easy_perform(c) == CURLE_OK) {
+        char *loc = nullptr;
+        if (curl_easy_getinfo(c, CURLINFO_REDIRECT_URL, &loc) == CURLE_OK && loc) {
+            target = loc;
+        }
+    }
+    curl_easy_cleanup(c);
+    return target;
+}
+
+// The text with a short link's target appended, when the text has no BV/av of its own.
+std::string with_short_link_target(const std::string &text)
+{
+    static const std::regex bv_or_av(R"(BV[0-9A-Za-z]{10,}|\bav[0-9]{1,20}\b)", std::regex_constants::icase);
+    std::string host, code;
+    if (std::regex_search(text, bv_or_av) || !extract_short_code(text, host, code)) {
+        return text;
+    }
+    const std::string target = resolve_short_link(host, code);
+    return target.empty() ? text : text + " " + target;
 }
 
 // Truncate to at most max_len bytes without splitting a multi-byte UTF-8
@@ -82,8 +136,9 @@ std::string cq_escape(const std::string &s)
 
 namespace bili_decode {
 
-std::string decode_video_text(const std::string &input_text)
+std::string decode_video_text(const std::string &raw_text)
 {
+    const std::string input_text = with_short_link_target(raw_text);
     std::string bvid;
     std::string aid;
 
@@ -134,6 +189,51 @@ std::string decode_video_text(const std::string &input_text)
         << "\n";
     oss << "Link: https://www.bilibili.com/video/" << out_bvid << "/";
     return trim(oss.str());
+}
+
+bool fetch_video_info(const std::string &raw_text, bili_card::info_t &info)
+{
+    const std::string input_text = with_short_link_target(raw_text);
+    std::string bvid;
+    std::string aid;
+    if (!extract_bvid(input_text, bvid) && !extract_aid(input_text, aid)) {
+        return false;
+    }
+    const std::string path = !bvid.empty() ? "/x/web-interface/view?bvid=" + bvid
+                                           : "/x/web-interface/view?aid=" + aid;
+    const Json::Value root = bili_http::safe_get_json("https://api.bilibili.com", path);
+    if (!root.isObject() || root.get("code", -1).asInt() != 0 || !root["data"].isObject()) {
+        return false;
+    }
+    const Json::Value d = root["data"];
+    const std::string out_bvid = d.get("bvid", "").asString();
+    if (out_bvid.empty()) {
+        return false;
+    }
+    const auto i64 = [](const Json::Value &v) -> int64_t {
+        return v.isNumeric() ? v.asInt64() : -1;
+    };
+    info.kind = bili_card::kind_t::video_info;
+    info.title = d.get("title", "").asString();
+    info.up = d["owner"].get("name", "").asString();
+    info.face_url = d["owner"].get("face", "").asString();
+    info.cover_url = d.get("pic", "").asString();
+    info.link = "https://www.bilibili.com/video/" + out_bvid;
+    info.ts = i64(d["pubdate"]);
+    info.duration_sec = static_cast<int>(std::max<int64_t>(0, i64(d["duration"])));
+    info.category = d.get("tname", "").asString();
+    info.desc = d.get("desc", "").asString();
+    if (info.desc == "-") {
+        info.desc.clear();
+    }
+    const Json::Value s = d["stat"];
+    info.stats.view = i64(s["view"]);
+    info.stats.danmaku = i64(s["danmaku"]);
+    info.stats.like = i64(s["like"]);
+    info.stats.coin = i64(s["coin"]);
+    info.stats.favorite = i64(s["favorite"]);
+    info.stats.share = i64(s["share"]);
+    return true;
 }
 
 } // namespace bili_decode

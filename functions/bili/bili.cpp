@@ -33,6 +33,7 @@ using bili_utils::compact_cover_url_square;
 using bili_utils::first_non_empty;
 using bili_utils::join_tokens;
 using bili_utils::json_to_i64;
+using bili_utils::duration_seconds;
 using bili_utils::live_jump_link;
 using bili_utils::mask_cookie_text;
 using bili_utils::send_group_msg_checked;
@@ -55,7 +56,11 @@ bool has_video_token_for_decode(const std::string &s)
                                   std::regex_constants::icase);
     static const std::regex av_re("\\bav([0-9]{1,20})\\b",
                                   std::regex_constants::icase);
-    return std::regex_search(s, bv_re) || std::regex_search(s, av_re);
+    // b23.tv / bili2233.cn short links, typed or inside a shared card (2026-11-16)
+    static const std::regex short_re(R"((b23\.tv|bili2233\.cn)\\?/[0-9A-Za-z]{4,16})",
+                                     std::regex_constants::icase);
+    return std::regex_search(s, bv_re) || std::regex_search(s, av_re) ||
+           std::regex_search(s, short_re);
 }
 
 std::string build_help_text(help_level_t level, bool in_group,
@@ -1131,6 +1136,7 @@ bool bili::fetch_video_snapshot(userid_t uid, up_snapshot_t &snapshot) const
         snapshot.video_title = archive.get("title", "").asString();
         snapshot.video_cover =
             compact_cover_url_169(archive.get("cover", "").asString());
+        snapshot.video_duration = duration_seconds(archive["duration_text"]);
         snapshot.video_pub_ts =
             json_to_i64(pick["modules"]["module_author"].get("pub_ts", 0));
         if (snapshot.name.empty()) {
@@ -1172,6 +1178,7 @@ bool bili::fetch_video_snapshot(userid_t uid, up_snapshot_t &snapshot) const
                     snapshot.video_title = first.get("title", "").asString();
                     snapshot.video_cover =
                         compact_cover_url_169(first.get("pic", "").asString());
+                    snapshot.video_duration = duration_seconds(first["length"]);
                     snapshot.video_pub_ts =
                         json_to_i64(first.get("created", 0));
 
@@ -1269,6 +1276,7 @@ bool bili::fetch_video_snapshot(userid_t uid, up_snapshot_t &snapshot) const
             std::string bvid;
             std::string title;
             std::string cover;
+            int duration = 0;
             uint64_t aid = 0;
 
             const std::string card_raw = one.get("card", "").asString();
@@ -1277,6 +1285,7 @@ bool bili::fetch_video_snapshot(userid_t uid, up_snapshot_t &snapshot) const
                 bvid = card.get("bvid", "").asString();
                 title = card.get("title", "").asString();
                 cover = card.get("pic", "").asString();
+                duration = duration_seconds(card["duration"]);
                 if (card["aid"].isUInt64()) {
                     aid = card["aid"].asUInt64();
                 }
@@ -1315,6 +1324,7 @@ bool bili::fetch_video_snapshot(userid_t uid, up_snapshot_t &snapshot) const
             snapshot.video_bvid = bvid;
             snapshot.video_title = title;
             snapshot.video_cover = compact_cover_url_169(cover);
+            snapshot.video_duration = duration;
             snapshot.video_pub_ts =
                 json_to_i64(one["desc"].get("timestamp", 0));
 
@@ -1683,6 +1693,55 @@ bili::build_live_off_push_message(userid_t uid,
     return oss.str();
 }
 
+std::string bili::build_push(bot *p, userid_t uid, const up_snapshot_t &snap,
+                             bili_card::kind_t kind) const
+{
+    using bili_card::kind_t;
+    bili_card::info_t info;
+    info.kind = kind;
+    info.up = snap.name.empty() ? std::to_string(uid) : snap.name;
+    info.face_url = snap.avatar;
+    std::string fallback;
+    switch (kind) {
+    case kind_t::video:
+        info.title = snap.video_title;
+        info.cover_url = snap.video_cover;
+        info.link = "https://www.bilibili.com/video/" + snap.video_bvid;
+        info.ts = snap.video_pub_ts;
+        info.duration_sec = snap.video_duration;
+        fallback = build_video_push_message(uid, snap);
+        break;
+    case kind_t::dynamic:
+        info.title = snap.dynamic_text;
+        info.cover_url = snap.dynamic_cover;
+        info.link = "https://t.bilibili.com/" + snap.dynamic_id;
+        info.ts = snap.dynamic_pub_ts;
+        fallback = build_dynamic_push_message(uid, snap);
+        break;
+    case kind_t::live_on:
+    case kind_t::live_off:
+        info.title = snap.live_title;
+        info.cover_url = snap.live_cover;
+        info.link = live_jump_link(uid, snap.live_room_id);
+        info.ts = std::time(nullptr);
+        fallback = kind == kind_t::live_on
+                       ? build_live_on_push_message(uid, snap)
+                       : build_live_off_push_message(uid, snap);
+        break;
+    }
+    std::string err;
+    const std::string pic = bili_card::render(
+        info, p ? p->getResourceDir() : std::string("./resource"), err);
+    if (pic.empty()) {
+        if (p) {
+            p->setlog(LOG::ERROR, fmt::format("bili card render failed uid={}: {}", uid, err));
+        }
+        return fallback;
+    }
+    return "[CQ:image,file=file://" + pic + ",summary=" +
+           cq_encode(bili_card::summary(info)) + "] " + info.link;
+}
+
 std::string bili::query_one(userid_t uid) const
 {
     const up_snapshot_t snap = fetch_snapshot(uid);
@@ -2023,6 +2082,29 @@ void bili::send_decoded_video(const std::string &out,
     }
 }
 
+bool bili::send_video_info(const std::string &text, const msg_meta &conf) const
+{
+    bili_card::info_t info;
+    if (bili_decode::fetch_video_info(text, info)) {
+        std::string err;
+        const std::string pic = bili_card::render(
+            info, conf.p ? conf.p->getResourceDir() : std::string("./resource"), err);
+        if (!pic.empty()) {
+            conf.p->cq_send("[CQ:image,file=file://" + pic + ",summary=" +
+                                cq_encode(bili_card::summary(info)) + "] " + info.link,
+                            conf);
+            return true;
+        }
+        conf.p->setlog(LOG::ERROR, fmt::format("bili video-info render failed: {}", err));
+    }
+    const std::string out = bili_decode::decode_video_text(text);
+    if (out.empty()) {
+        return false;
+    }
+    send_decoded_video(out, conf);
+    return true;
+}
+
 void bili::process(std::string message, const msg_meta &conf)
 {
     const std::string raw = trim(message);
@@ -2035,10 +2117,7 @@ void bili::process(std::string message, const msg_meta &conf)
     if (!cmd_strip_prefix(raw, "bili.", body) &&
         !cmd_strip_prefix(raw, "bili.", body)) {
         if (has_video_token_for_decode(raw)) {
-            const std::string out = bili_decode::decode_video_text(raw);
-            if (!out.empty()) {
-                send_decoded_video(out, conf);
-            }
+            (void)send_video_info(raw, conf);
         }
         return;
     }
@@ -2425,13 +2504,10 @@ void bili::process(std::string message, const msg_meta &conf)
                  return true;
              }
 
-             std::string out = bili_decode::decode_video_text(args);
-             if (out.empty()) {
+             if (!send_video_info(args, conf)) {
                  conf.p->cq_send("未识别到有效 BV/av，或视频信息拉取失败",
                                  conf);
-                 return true;
              }
-             send_decoded_video(out, conf);
              return true;
          }},
         {"wouldpush",
@@ -2627,20 +2703,20 @@ void bili::process(std::string message, const msg_meta &conf)
                      conf.p->cq_send("simulate: 当前无可用视频快照", conf);
                      return true;
                  }
-                 out = build_video_push_message(uid, snap);
+                 out = build_push(conf.p, uid, snap, bili_card::kind_t::video);
              }
              else if (action == "dynamic" || action == "feed") {
                  if (!snap.has_dynamic) {
                      conf.p->cq_send("simulate: 当前无可用feed快照", conf);
                      return true;
                  }
-                 out = build_dynamic_push_message(uid, snap);
+                 out = build_push(conf.p, uid, snap, bili_card::kind_t::dynamic);
              }
              else if (action == "live_on") {
-                 out = build_live_on_push_message(uid, snap);
+                 out = build_push(conf.p, uid, snap, bili_card::kind_t::live_on);
              }
              else if (action == "live_off") {
-                 out = build_live_off_push_message(uid, snap);
+                 out = build_push(conf.p, uid, snap, bili_card::kind_t::live_off);
              }
              else {
                  conf.p->cq_send("参数错误: action 仅支持 "

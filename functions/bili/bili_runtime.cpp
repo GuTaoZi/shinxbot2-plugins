@@ -255,24 +255,25 @@ void bili::handle_poll(bot *p)
                               snap.name.empty() ? "<unknown>" : snap.name,
                               join_tokens(update_types)));
 
+        // Draw each update's picture once, then send the same message to every subscribed group.
+        std::vector<std::string> msgs;
+        if (push_dynamic) {
+            msgs.push_back(build_push(p, uid, snap, bili_card::kind_t::dynamic));
+        }
+        if (push_video) {
+            msgs.push_back(build_push(p, uid, snap, bili_card::kind_t::video));
+        }
+        if (push_live_on) {
+            msgs.push_back(build_push(p, uid, snap, bili_card::kind_t::live_on));
+        }
+        if (push_live_off) {
+            msgs.push_back(build_push(p, uid, snap, bili_card::kind_t::live_off));
+        }
         const auto &groups = uid_to_groups[uid];
         for (groupid_t gid : groups) {
-            const auto try_send = [&](const std::string &msg) {
+            for (const auto &msg : msgs) {
                 std::string err;
                 (void)send_group_msg_checked(p, gid, msg, err);
-            };
-
-            if (push_dynamic) {
-                try_send(build_dynamic_push_message(uid, snap));
-            }
-            if (push_video) {
-                try_send(build_video_push_message(uid, snap));
-            }
-            if (push_live_on) {
-                try_send(build_live_on_push_message(uid, snap));
-            }
-            if (push_live_off) {
-                try_send(build_live_off_push_message(uid, snap));
             }
         }
     }
@@ -281,4 +282,5 @@ void bili::handle_poll(bot *p)
         std::lock_guard<std::mutex> lock(mutex_);
         save_cache_unlocked();
     }
+    bili_card::prune(p->getResourceDir()); // pictures older than two days
 }

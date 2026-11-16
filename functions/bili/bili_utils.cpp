@@ -152,6 +152,41 @@ std::string live_jump_link(userid_t uid, uint64_t room_id)
     return "https://space.bilibili.com/" + std::to_string(uid);
 }
 
+int duration_seconds(const Json::Value &v)
+{
+    if (v.isIntegral()) {
+        return static_cast<int>(std::max<int64_t>(0, v.asInt64()));
+    }
+    if (!v.isString()) {
+        return 0;
+    }
+    const std::string s = v.asString();
+    if (str_all_digits(s)) {
+        return s.size() < 9 ? std::stoi(s) : 0;
+    }
+    int total = 0, part = 0, parts = 0;
+    bool digits = false;
+    for (char c : s) {
+        if (c >= '0' && c <= '9') {
+            part = part * 10 + (c - '0');
+            digits = true;
+            if (part > 100000) {
+                return 0;
+            }
+        }
+        else if (c == ':' && digits) {
+            total = total * 60 + part;
+            part = 0;
+            digits = false;
+            ++parts;
+        }
+        else {
+            return 0;
+        }
+    }
+    return (digits && parts >= 1 && parts <= 2) ? total * 60 + part : 0;
+}
+
 std::string join_tokens(const std::vector<std::string> &tokens)
 {
     std::ostringstream oss;

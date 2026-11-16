@@ -22,6 +22,8 @@ std::string compact_cover_url_avatar(const std::string &url);
 
 std::string up_name_with_uid(userid_t uid, const std::string &name);
 std::string live_jump_link(userid_t uid, uint64_t room_id);
+// Video length in seconds from "H:MM:SS", "MM:SS", a number of seconds, or a numeric string; 0 if unknown.
+int duration_seconds(const Json::Value &v);
 std::string join_tokens(const std::vector<std::string> &tokens);
 
 bool str_to_u64_if_digits(const std::string &s, uint64_t &out);
