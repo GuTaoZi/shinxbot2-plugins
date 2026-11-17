@@ -31,6 +31,7 @@ import glob
 import json
 import math
 import os
+import re
 import struct
 from collections import deque
 from pathlib import Path
@@ -47,6 +48,12 @@ SINGLE_SIDE = {"0", "E", "9"}   # chapters with only an A side: key without the 
 # Rooms nobody plays (CelesteGuessr's rooms are hand-checked too): 7A's credits scenes, Farewell's cutscene rooms.
 SKIP_PREFIX = ("credits",)
 SKIP_ROOMS = {"end-cinematic", "end-granny", "intro-00-past"}
+# Where the chapter starts when it isn't the map's first room (checked against AreaData.Load in Celeste.dll,
+# 2026-11-17, user: "I think 9-8 you mark is actually 9-9, and 9-9 is for golden berry-specific single room"): Farewell's
+# first checkpoint (一个人 Singular) is a-00, so the intro rooms before it are the Start section; 6A's bonfire room "start"
+# lies apart from the rest and is its Start section ("check 6A's starting plot part").
+START_ROOM = {"LostLevels": "intro-01-future"}
+FIRST_SECTION = {"6-Reflection": ["start"]}
 
 
 def read_map(path):
@@ -186,21 +193,34 @@ def tile_scale(rooms, names):
 
 def sections(rooms, order, checkpoints, reachable):
     """The map in pictures (2026-11-17: 7A at one pixel per tile is 3600 px square, Farewell 18400 px wide - too
-    small to read in QQ): one picture when the whole side fits at 2+ px per tile, else a section from each checkpoint
-    room along the route; rooms the route never reaches (Farewell's far-off ending rooms) are grouped by touch."""
-    if tile_scale(rooms, order) >= 2:
-        return [order]
-    parts, cur = [], []
-    for n in order:
-        if n not in reachable:
-            continue
-        if n in checkpoints and cur:
+    small to read in QQ): a section from each checkpoint room along the route - every side with checkpoints, not only
+    big ones (user: "if player directly guess *cg 5A 4, then the whole 5A will be calculated as same chapter ...
+    do not allow non-chapter whole room guess"); rooms the route never reaches (Farewell's golden-berry room) are
+    grouped by touch.
+    When every checkpoint is an "x-00" room of its own letter (5A: b-00 c-00 d-00 e-00), the vanilla names say the
+    section: 5A's d and e areas sit beside its c area, so walking by touch mixed them (2026-11-17)."""
+    letter = lambda n: n[0] if re.match(r"[a-z]-", n) else None
+    cps = sorted(checkpoints)
+    if cps and all(re.fullmatch(r"[a-z]-00", c) for c in cps) and len({c[0] for c in cps}) == len(cps):
+        letters = sorted({c[0] for c in cps} | ({letter(order[0])} if letter(order[0]) else set()))
+        parts = [[n for n in order if letter(n) == l] for l in letters]
+        parts = [p for p in parts if p]
+        rest = [n for n in order if letter(n) not in letters]
+        if letter(order[0]) is None:   # 8A starts in "00", "01"...: the rooms without a letter are its Start section
+            parts.insert(0, [n for n in rest if n in reachable])
+            rest = [n for n in rest if n not in reachable]
+    else:
+        parts, cur = [], []
+        for n in order:
+            if n not in reachable:
+                continue
+            if n in checkpoints and cur:
+                parts.append(cur)
+                cur = []
+            cur.append(n)
+        if cur:
             parts.append(cur)
-            cur = []
-        cur.append(n)
-    if cur:
-        parts.append(cur)
-    rest = [n for n in order if n not in reachable]
+        rest = [n for n in order if n not in reachable]
     while rest:   # connected groups of the unreached rooms
         group, todo = [], [rest.pop(0)]
         while todo:
@@ -296,13 +316,21 @@ def build_side(celeste, exports, stem, side, out, names):
         if n in rooms:
             start = n
             break
-    order, reachable = number_rooms(rooms, start, "end" if "end" in rooms else None)
+    start = START_ROOM.get(stem, start) if START_ROOM.get(stem) in rooms else start
+    # a "start" room that touches nothing (5B, 6A) is the side's own Start section; 2A's is part of its first section
+    pre = [n for n in FIRST_SECTION.get(stem, ["start"]) if n in rooms
+           and not any(touch(rooms[n], rooms[m]) for m in rooms if m != n)]
+    main = {n: r for n, r in rooms.items() if n not in pre}
+    order, reachable = number_rooms(main, start, "end" if "end" in main else None)
+    order = pre + order   # global numbers: the separate Start section first
+    for i, n in enumerate(order, 1):
+        rooms[n]["num"] = i
     od = Path(out) / key
     (od / "shots").mkdir(parents=True, exist_ok=True)
     # (2026-11-17, user: "maybe use things like 7A-3 5? and send forward folded messages after chosen a chapter, with
     # each subchapter a image") rooms are numbered within their section: a guess is "7A-3 5"; one-section sides
     # keep "1A 19" (section 1).
-    parts = sections(rooms, order, checkpoints, reachable)
+    parts = ([pre] if pre else []) + sections(rooms, [n for n in order if n not in pre], checkpoints, reachable)
     maps = []
     for i, part in enumerate(parts, 1):
         for j, n in enumerate(part, 1):
