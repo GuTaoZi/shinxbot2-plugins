@@ -26,7 +26,8 @@ std::string lower_ascii(std::string s)
 
 bool all_digits(const std::string &s)
 {
-    return !s.empty() && std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isdigit(c); });
+    return !s.empty() && s.size() <= 6 &&
+           std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isdigit(c); });
 }
 
 std::string replace_all(std::string s, const std::string &from, const std::string &to)
@@ -56,6 +57,8 @@ std::string fmt_secs(double s)
     return o.str();
 }
 
+std::string image(const std::string &file) { return "[CQ:image,file=file://" + file + ",id=40000]"; }
+
 void text(Magick::Image &img, double pt, const Magick::Color &fill, double x, double y, const std::string &s)
 {
     std::vector<Magick::Drawable> d{Magick::DrawableFont(FONT_B), Magick::DrawablePointSize(pt),
@@ -80,10 +83,22 @@ void badge(Magick::Image &img, double cx, double cy, double r, const Magick::Col
 
 } // namespace
 
+// ---- side data ---------------------------------------------------------------------------------------------------
+
 const celesteguessr::room_t *celesteguessr::side_t::room(int num) const
 {
     for (const auto &r : rooms) {
         if (r.num == num) {
+            return &r;
+        }
+    }
+    return nullptr;
+}
+
+const celesteguessr::room_t *celesteguessr::side_t::room_at(int part, int local) const
+{
+    for (const auto &r : rooms) {
+        if (r.part == part && r.local == local) {
             return &r;
         }
     }
@@ -104,6 +119,23 @@ const celesteguessr::room_t *celesteguessr::side_t::room_named(const std::string
     return nullptr;
 }
 
+int celesteguessr::side_t::part_size(int part) const
+{
+    return static_cast<int>(std::count_if(rooms.begin(), rooms.end(), [&](const room_t &r) { return r.part == part; }));
+}
+
+std::string celesteguessr::side_t::label(int num) const
+{
+    const room_t *r = room(num);
+    if (r == nullptr) {
+        return key + " ?";
+    }
+    return maps.size() > 1 ? key + "-" + std::to_string(r->part) + " " + std::to_string(r->local)
+                           : key + " " + std::to_string(r->local);
+}
+
+// ---- setup -------------------------------------------------------------------------------------------------------
+
 celesteguessr::celesteguessr()
 {
     sync_dirs(nullptr);
@@ -113,12 +145,13 @@ void celesteguessr::sync_dirs(const bot *p)
 {
     const std::string cfg = p ? p->getConfigDir() : bot_config_path("");
     const std::string res = p ? p->getResourceDir() : bot_resource_path("");
-    if (cfg == config_dir_ && res == resource_dir_ && !sides_.empty()) {
+    const std::string res_abs = fs::absolute(res).lexically_normal().string();
+    if (cfg == config_dir_ && res_abs == resource_dir_ && !sides_.empty()) {
         return;
     }
     config_dir_ = cfg;
     // absolute: NapCat reads the file:// pictures from its own working directory (the bot's is "./resource")
-    resource_dir_ = fs::absolute(res).lexically_normal().string();
+    resource_dir_ = res_abs;
     data_dir_ = (fs::path(resource_dir_) / "celesteguessr").string();
     load_data();
 }
@@ -142,13 +175,23 @@ bool celesteguessr::load_data()
         s.name_zh = J["name_zh"].asString();
         s.name_en = J["name_en"].asString();
         s.dir = e.path().string();
-        s.overview = (e.path() / J["overview"]["file"].asString()).string();
-        s.scale = J["overview"]["scale"].asDouble();
-        s.ox = J["overview"]["ox"].asDouble();
-        s.oy = J["overview"]["oy"].asDouble();
+        const Json::Value &maps = J["maps"].isArray() ? J["maps"] : Json::Value(Json::arrayValue);
+        for (const auto &m : maps) {
+            s.maps.push_back({(e.path() / m["file"].asString()).string(), m["scale"].asDouble(), m["ox"].asDouble(),
+                              m["oy"].asDouble()});
+        }
+        if (s.maps.empty()) { // data built before sections: one map, rooms numbered along the side
+            const Json::Value &o = J["overview"];
+            s.maps.push_back({(e.path() / o["file"].asString()).string(), o["scale"].asDouble(), o["ox"].asDouble(),
+                              o["oy"].asDouble()});
+        }
         for (const auto &r : J["rooms"]) {
-            s.rooms.push_back({r["num"].asInt(), r["name"].asString(), r["x"].asDouble(), r["y"].asDouble(),
-                               r["w"].asDouble(), r["h"].asDouble()});
+            room_t rm{r["num"].asInt(), r["name"].asString(), r["x"].asDouble(), r["y"].asDouble(),
+                      r["w"].asDouble(), r["h"].asDouble(), r.get("part", 1).asInt(), r.get("local", 0).asInt()};
+            if (rm.local == 0) {
+                rm.local = rm.num;
+            }
+            s.rooms.push_back(rm);
         }
         for (const auto &t : J["shots"]) {
             s.shots.push_back({(e.path() / t["file"].asString()).string(), t["room"].asInt(), t["x"].asDouble(),
@@ -177,6 +220,17 @@ std::string celesteguessr::scores_path() const
     return (fs::path(config_dir_) / "features/celesteguessr/scores.json").string();
 }
 
+std::string celesteguessr::keys_text() const
+{
+    std::string keys;
+    for (const auto &kv : sides_) {
+        keys += (keys.empty() ? "" : " ") + kv.first;
+    }
+    return keys;
+}
+
+// ---- parsing -----------------------------------------------------------------------------------------------------
+
 // "1a" -> "1A", "8" -> "8A", "p" / "序幕" -> "0", "e" / "尾声" -> "E", "9" / "再见" -> "9"; "" if not a side.
 std::string celesteguessr::side_key(std::string s)
 {
@@ -199,51 +253,26 @@ std::string celesteguessr::side_key(std::string s)
     return "";
 }
 
-bool celesteguessr::parse_guess(const std::string &body, std::string &side, int &room, std::string &err) const
+// "7A-3" -> 7A, section 3; "7A" -> 7A, section 0 (not given). False if not a place.
+bool celesteguessr::parse_place(const std::string &tok, std::string &side, int &part) const
 {
-    std::string b = body;
-    for (const char *sep : {"-", "#", "/", ",", "，", "号", "房间", "　"}) {
-        b = replace_all(b, sep, " ");
-    }
-    std::vector<std::string> t = split_ws(b);
-    std::string room_tok;
-    if (t.size() >= 2) {
-        side = side_key(t[0]);
-        room_tok = t[1];
-    }
-    else if (t.size() == 1) { // "1a19": the longest leading side key, the rest is the room
-        side.clear();
-        for (size_t n = std::min<size_t>(t[0].size() - 1, 8); n >= 1 && side.empty(); --n) {
-            const std::string k = side_key(t[0].substr(0, n));
-            if (!k.empty()) {
-                side = k;
-                room_tok = t[0].substr(n);
-            }
+    const size_t dash = tok.rfind('-');
+    part = 0;
+    if (dash != std::string::npos && dash > 0) {
+        const std::string p = tok.substr(dash + 1);
+        if (!all_digits(p)) {
+            return false;
         }
+        side = side_key(tok.substr(0, dash));
+        part = std::stoi(p);
     }
-    if (side.empty() || room_tok.empty()) {
-        err = "格式：*cg <章节> <房间号>，如 *cg 1A 19";
-        return false;
+    else {
+        side = side_key(tok);
     }
-    auto it = sides_.find(side);
-    if (it == sides_.end()) {
-        std::string keys;
-        for (const auto &kv : sides_) {
-            keys += (keys.empty() ? "" : " ") + kv.first;
-        }
-        err = "题库里还没有 " + side + "（现有：" + keys + "）";
-        return false;
-    }
-    const room_t *r = all_digits(room_tok) ? it->second.room(std::stoi(room_tok.substr(0, 6)))
-                                           : it->second.room_named(room_tok);
-    if (r == nullptr) {
-        err = side + " 没有房间 " + room_tok + "（1-" + std::to_string(it->second.rooms.size()) +
-              "，见 *cg map " + side + "）";
-        return false;
-    }
-    room = r->num;
-    return true;
+    return !side.empty();
 }
+
+// ---- scoring -----------------------------------------------------------------------------------------------------
 
 // "1A" -> "1", "8C" -> "8", "0" / "E" / "9" stay.
 std::string celesteguessr::chapter_of(const std::string &key)
@@ -290,15 +319,108 @@ std::string celesteguessr::tier(int score)
     return "没猜中";
 }
 
+// ---- sending -----------------------------------------------------------------------------------------------------
+
+void celesteguessr::reply(const msg_meta &conf, const std::string &s) const
+{
+    conf.p->cq_send((conf.message_id ? "[CQ:reply,id=" + std::to_string(conf.message_id) + "]" : std::string()) + s,
+                    conf);
+}
+
+void celesteguessr::react(const msg_meta &conf, const std::string &emoji, const std::string &fallback) const
+{
+    bool ok = false;
+    try {
+        Json::Value J;
+        J["message_id"] = conf.message_id;
+        J["emoji_id"] = emoji;
+        ok = string_to_json(conf.p->cq_send("set_msg_emoji_like", J))["status"].asString() == "ok";
+    }
+    catch (...) {
+    }
+    if (!ok && !fallback.empty()) {
+        reply(conf, fallback);
+    }
+}
+
+// Every section of a side: one picture, or a folded forward message with a node per section.
+void celesteguessr::send_side_maps(const msg_meta &conf, const side_t &s, round_t *r)
+{
+    const std::string head = s.key + " " + s.name_zh + "（" + std::to_string(s.rooms.size()) + " 个房间";
+    if (s.maps.size() == 1) {
+        if (r != nullptr && !r->maps_sent.insert(s.key).second) {
+            reply(conf, "已选 " + s.key + "，地图在上面，*cg <房间号> 作答");
+            return;
+        }
+        reply(conf, head + "）*cg <房间号> 作答" + image(s.maps[0].file));
+        return;
+    }
+    if (r != nullptr && !r->maps_sent.insert(s.key).second) {
+        reply(conf, "已选 " + s.key + "，各段地图在上面：*cg <段> 看单段，或 *cg " + s.key + "-<段> <房间> 作答");
+        return;
+    }
+    const std::string intro = head + "，分 " + std::to_string(s.maps.size()) + " 段）\n*cg <段> 只看一段，*cg " + s.key +
+                              "-<段> <房间> 作答，如 *cg " + s.key + "-2 5";
+    Json::Value messages(Json::arrayValue);
+    const std::string uin = std::to_string(conf.p->get_botqq());
+    auto node = [&](const std::string &content) {
+        Json::Value n(Json::objectValue), d(Json::objectValue);
+        n["type"] = "node";
+        d["name"] = "CelesteGuessr";
+        d["uin"] = uin;
+        d["content"] = string_to_messageArr(content);
+        n["data"] = d;
+        messages.append(n);
+    };
+    node(intro);
+    for (size_t i = 0; i < s.maps.size(); ++i) {
+        const int part = static_cast<int>(i) + 1;
+        node(s.key + "-" + std::to_string(part) + "（" + std::to_string(s.part_size(part)) + " 个房间）" +
+             image(s.maps[i].file));
+    }
+    Json::Value req(Json::objectValue);
+    std::string endpoint;
+    if (conf.message_type == "group") {
+        req["group_id"] = Json::UInt64(conf.group_id);
+        endpoint = "send_group_forward_msg";
+    }
+    else {
+        req["user_id"] = Json::UInt64(conf.user_id);
+        endpoint = "send_private_forward_msg";
+    }
+    req["messages"] = messages;
+    const Json::Value res = string_to_json(conf.p->cq_send(endpoint, req));
+    if (!res.isObject() || res.get("status", "ok").asString() == "failed") { // plain message instead
+        std::string all = intro;
+        for (const auto &m : s.maps) {
+            all += image(m.file);
+        }
+        reply(conf, all);
+    }
+}
+
+void celesteguessr::send_part_map(const msg_meta &conf, const side_t &s, int part, round_t *r)
+{
+    const std::string tag = s.key + "-" + std::to_string(part);
+    if (r != nullptr && !r->maps_sent.insert(tag).second) {
+        reply(conf, "已选 " + tag + "，地图在上面，*cg <房间号> 作答");
+        return;
+    }
+    reply(conf, tag + " " + s.name_zh + "（第 " + std::to_string(part) + "/" + std::to_string(s.maps.size()) + " 段，" +
+                    std::to_string(s.part_size(part)) + " 个房间）*cg <房间号> 作答" +
+                    image(s.maps[static_cast<size_t>(part) - 1].file));
+}
+
+// ---- a round -----------------------------------------------------------------------------------------------------
+
 void celesteguessr::start_round(const msg_meta &conf, int seconds)
 {
     const std::string sc = scope(conf);
     auto &r = rounds_[sc];
     if (r.active) {
         const auto left = std::chrono::duration_cast<std::chrono::seconds>(r.deadline - clock_t_::now()).count();
-        const auto &s = sides_.at(r.side);
-        conf.p->cq_send("[CQ:image,file=file://" + s.shots[r.shot].file + ",id=40000]本轮还在进行，剩 " +
-                            std::to_string(std::max<long long>(0, left)) + " 秒。*cg <章节> <房间号> 作答",
+        conf.p->cq_send(image(sides_.at(r.side).shots[r.shot].file) + "本轮还在进行，剩 " +
+                            std::to_string(std::max<long long>(0, left)) + " 秒。*cg <章节> 先选章节",
                         conf);
         return;
     }
@@ -307,21 +429,21 @@ void celesteguessr::start_round(const msg_meta &conf, int seconds)
         return;
     }
     auto &recent = recent_[sc];
-    std::pair<std::string, size_t> pick;
+    std::pair<std::string, size_t> pk;
     for (int tries = 0; tries < 50; ++tries) {
-        pick = pool_[get_random(static_cast<int>(pool_.size()))];
-        if (std::find(recent.begin(), recent.end(), pick) == recent.end()) {
+        pk = pool_[get_random(static_cast<int>(pool_.size()))];
+        if (std::find(recent.begin(), recent.end(), pk) == recent.end()) {
             break;
         }
     }
-    recent.push_back(pick);
+    recent.push_back(pk);
     while (recent.size() > std::min(kRecent, pool_.size() / 2)) {
         recent.pop_front();
     }
     r = round_t{};
     r.active = true;
-    r.side = pick.first;
-    r.shot = pick.second;
+    r.side = pk.first;
+    r.shot = pk.second;
     r.seconds = seconds;
     r.started = clock_t_::now();
     r.deadline = r.started + std::chrono::seconds(seconds);
@@ -330,62 +452,146 @@ void celesteguessr::start_round(const msg_meta &conf, int seconds)
     r.user_id = conf.user_id;
     r.group_id = conf.group_id;
     r.last_activity = r.started;
-
-    std::string keys;
-    for (const auto &kv : sides_) {
-        keys += (keys.empty() ? "" : " ") + kv.first;
-    }
-    conf.p->cq_send("[CQ:image,file=file://" + sides_.at(r.side).shots[r.shot].file +
-                        ",id=40000]CelesteGuessr：这张截图在哪里？\n"
-                        "① *cg 1A 先选章节（会发这一章的地图）\n"
-                        "② *cg 19 再按地图上的号码猜房间（每人一次）\n"
-                        "熟练的话一步：*cg 1A 19 · *cg check 看进度\n"
-                        "限时 " + std::to_string(seconds) + " 秒 · 题库：" + keys,
+    conf.p->cq_send(image(sides_.at(r.side).shots[r.shot].file) +
+                        "CelesteGuessr：这张截图在哪里？\n"
+                        "① *cg 1A 先选章节（会发这一章的地图；大章节按存档点分段，如 7A-3）\n"
+                        "② *cg 19 按地图上的号码猜房间（每人一次）\n"
+                        "一步到位：*cg 1A 19 · *cg 7A-3 5 · *cg check 看进度\n"
+                        "限时 " + std::to_string(seconds) + " 秒 · 题库：" + keys_text(),
                     conf);
 }
 
-void celesteguessr::pick_chapter(const msg_meta &conf, round_t &r, const std::string &side)
+void celesteguessr::pick(const msg_meta &conf, round_t &r, const std::string &side, int part)
 {
     auto it = sides_.find(side);
     if (it == sides_.end()) {
-        std::string keys;
-        for (const auto &kv : sides_) {
-            keys += (keys.empty() ? "" : " ") + kv.first;
-        }
-        conf.p->cq_send("[CQ:reply,id=" + std::to_string(conf.message_id) + "]题库里还没有 " + side + "（现有：" +
-                            keys + "）",
-                        conf);
+        reply(conf, "题库里还没有 " + side + "（现有：" + keys_text() + "）");
         return;
     }
-    r.picks[conf.user_id] = side;
-    r.last_activity = clock_t_::now();
     const side_t &s = it->second;
-    if (r.maps_sent.insert(side).second) {
-        conf.p->cq_send("[CQ:reply,id=" + std::to_string(conf.message_id) + "]" + s.key + " " + s.name_zh + "（" +
-                            std::to_string(s.rooms.size()) + " 个房间）*cg <房间号> 作答[CQ:image,file=file://" +
-                            s.overview + ",id=40000]",
-                        conf);
+    if (part < 0 || part > static_cast<int>(s.maps.size())) {
+        reply(conf, s.key + " 只有 " + std::to_string(s.maps.size()) + " 段");
+        return;
+    }
+    if (s.maps.size() == 1) {
+        part = 1;
+    }
+    r.picks[conf.user_id] = {s.key, part};
+    r.last_activity = clock_t_::now();
+    if (part == 0) {
+        send_side_maps(conf, s, &r);
+    }
+    else if (s.maps.size() == 1) {
+        send_side_maps(conf, s, &r);
     }
     else {
-        conf.p->cq_send("[CQ:reply,id=" + std::to_string(conf.message_id) + "]已选 " + s.key + "，地图在上面，*cg <房间号> 作答",
-                        conf);
+        send_part_map(conf, s, part, &r);
     }
 }
 
 void celesteguessr::record_guess(const msg_meta &conf, round_t &r, const std::string &side, int room)
 {
     const side_t &ans = sides_.at(r.side);
+    const side_t &gs = sides_.at(side);
     guess_t g;
     g.user = conf.user_id;
     g.name = display_name_in_group(conf, conf.user_id);
     g.side = side;
     g.room = room;
-    g.score = score_for(ans, ans.shots[r.shot], side, sides_.at(side).room(room));
+    g.score = score_for(ans, ans.shots[r.shot], side, gs.room(room));
     g.secs = std::chrono::duration<double>(clock_t_::now() - r.started).count();
     r.guesses.push_back(g);
-    r.picks[conf.user_id] = side;
+    r.picks[conf.user_id] = {side, gs.room(room) ? gs.room(room)->part : 1};
     r.last_activity = clock_t_::now();
-    react(conf, "9989", "收到：" + side + " " + std::to_string(room));
+    react(conf, "9989", "收到：" + gs.label(room));
+}
+
+// What a player typed after *cg, in an open round: a chapter, a section, a room, or several at once.
+void celesteguessr::handle_answer(const msg_meta &conf, round_t &r, const std::vector<std::string> &t)
+{
+    auto pk = r.picks.find(conf.user_id);
+    const side_t *ps = pk != r.picks.end() && sides_.count(pk->second.side) ? &sides_.at(pk->second.side) : nullptr;
+    const int ppart = ps ? pk->second.part : 0;
+
+    // the room in a known side and section: number (within the section) or room name
+    auto guess_room = [&](const side_t &s, int part, const std::string &tok) {
+        const room_t *rm = all_digits(tok) ? s.room_at(part, std::stoi(tok)) : s.room_named(tok);
+        if (rm == nullptr) {
+            const std::string where = s.maps.size() > 1 ? s.key + "-" + std::to_string(part) : s.key;
+            reply(conf, where + " 没有房间 " + tok + "（1-" + std::to_string(s.part_size(part)) + "）");
+            return;
+        }
+        record_guess(conf, r, s.key, rm->num);
+    };
+    auto side_or_err = [&](const std::string &key) -> const side_t * {
+        auto it = sides_.find(key);
+        if (it == sides_.end()) {
+            reply(conf, "题库里还没有 " + key + "（现有：" + keys_text() + "）");
+            return nullptr;
+        }
+        return &it->second;
+    };
+
+    if (t.size() == 1) {
+        const std::string &tok = t[0];
+        if (ps != nullptr && all_digits(tok)) { // after a pick a bare number is a section, then a room
+            if (ps->maps.size() > 1 && ppart == 0) {
+                pick(conf, r, ps->key, std::stoi(tok));
+            }
+            else {
+                guess_room(*ps, std::max(ppart, 1), tok);
+            }
+            return;
+        }
+        std::string side;
+        int part = 0;
+        if (parse_place(tok, side, part)) { // "7A", "7A-3", "1" (= 1A when nothing is picked)
+            auto it = sides_.find(side);
+            if (part > 0 && it != sides_.end() && it->second.maps.size() == 1) { // "1A-19" on a one-section side
+                guess_room(it->second, 1, std::to_string(part));
+                return;
+            }
+            pick(conf, r, side, part);
+            return;
+        }
+        if (ps != nullptr && ppart > 0) { // a room name, e.g. "8zb"
+            guess_room(*ps, ppart, tok);
+            return;
+        }
+        reply(conf, all_digits(tok) ? "先选章节：*cg 1A，再 *cg " + tok : "格式：*cg 1A 19 · *cg 7A-3 5");
+        return;
+    }
+    // several at once: "1A 19", "7A-3 5", "7A 3 5"; "7A 3" on a big side picks section 3
+    std::string side;
+    int part = 0;
+    if (!parse_place(t[0], side, part)) {
+        reply(conf, "格式：*cg 1A 19 · *cg 7A-3 5");
+        return;
+    }
+    const side_t *s = side_or_err(side);
+    if (s == nullptr) {
+        return;
+    }
+    size_t i = 1;
+    if (part == 0 && s->maps.size() > 1) {
+        if (!all_digits(t[i])) {
+            reply(conf, s->key + " 分 " + std::to_string(s->maps.size()) + " 段：*cg " + s->key + "-<段> <房间>");
+            return;
+        }
+        part = std::stoi(t[i++]);
+        if (i >= t.size()) {
+            pick(conf, r, s->key, part);
+            return;
+        }
+    }
+    if (s->maps.size() == 1) {
+        part = 1;
+    }
+    if (part < 1 || part > static_cast<int>(s->maps.size())) {
+        reply(conf, s->key + " 只有 " + std::to_string(s->maps.size()) + " 段");
+        return;
+    }
+    guess_room(*s, part, t[i]);
 }
 
 void celesteguessr::send_check(const msg_meta &conf)
@@ -421,21 +627,21 @@ std::string celesteguessr::draw_reveal(const std::string &sc, const round_t &r) 
 {
     const side_t &s = sides_.at(r.side);
     const shot_t &shot = s.shots[r.shot];
-    Magick::Image img(s.overview);
-    auto X = [&](double wx) { return (wx - s.ox) * s.scale; };
-    auto Y = [&](double wy) { return (wy - s.oy) * s.scale; };
+    const room_t *ans = s.room(shot.room);
+    const int part = ans ? ans->part : 1;
+    const map_t &m = s.maps[static_cast<size_t>(part) - 1];
+    Magick::Image img(m.file);
+    auto X = [&](double wx) { return (wx - m.ox) * m.scale; };
+    auto Y = [&](double wy) { return (wy - m.oy) * m.scale; };
 
-    // the players' rooms (right side only), numbered by their place in the results
+    // the players' rooms on this section, numbered by their place in the results
     std::vector<guess_t> order = r.guesses;
     std::stable_sort(order.begin(), order.end(), [](const guess_t &a, const guess_t &b) {
         return a.score != b.score ? a.score > b.score : a.secs < b.secs;
     });
     for (size_t i = 0; i < order.size(); ++i) {
-        if (order[i].side != s.key) {
-            continue;
-        }
-        const room_t *rm = s.room(order[i].room);
-        if (rm == nullptr) {
+        const room_t *rm = order[i].side == s.key ? s.room(order[i].room) : nullptr;
+        if (rm == nullptr || rm->part != part) {
             continue;
         }
         img.draw(std::vector<Magick::Drawable>{Magick::DrawableFillColor("none"), Magick::DrawableStrokeColor("#00c8ff"),
@@ -445,10 +651,10 @@ std::string celesteguessr::draw_reveal(const std::string &sc, const round_t &r) 
         // top-right corner: the room's own number badge is top-left
         badge(img, X(rm->x + rm->w) - 18, Y(rm->y) + 18, 14, Magick::Color("#0090c0"), std::to_string(i + 1));
     }
-    // the answer: the screenshot's view and its centre
-    const double cx = X(shot.x), cy = Y(shot.y), hw = 160 * s.scale, hh = 90 * s.scale;
-    img.draw(std::vector<Magick::Drawable>{Magick::DrawableFillColor("none"), // a frame only: the room's shape stays visible
-                                           Magick::DrawableStrokeColor("#ffd600"), Magick::DrawableStrokeWidth(5),
+    // the answer: the screenshot's view and its centre (a frame only: the room's shape stays visible)
+    const double cx = X(shot.x), cy = Y(shot.y), hw = 160 * m.scale, hh = 90 * m.scale;
+    img.draw(std::vector<Magick::Drawable>{Magick::DrawableFillColor("none"), Magick::DrawableStrokeColor("#ffd600"),
+                                           Magick::DrawableStrokeWidth(5),
                                            Magick::DrawableRectangle(cx - hw, cy - hh, cx + hw, cy + hh)});
     img.draw(std::vector<Magick::Drawable>{Magick::DrawableFillColor("#ffd600"), Magick::DrawableStrokeColor("black"),
                                            Magick::DrawableStrokeWidth(3), Magick::DrawableCircle(cx, cy, cx + 11, cy)});
@@ -489,15 +695,16 @@ void celesteguessr::finish_round(const std::string &sc, round_t &r, bot *p, cons
     std::stable_sort(order.begin(), order.end(), [](const guess_t &a, const guess_t &b) {
         return a.score != b.score ? a.score > b.score : a.secs < b.secs;
     });
-    std::string msg = why + "！答案：" + s.key + " " + s.name_zh + " · " +
-                      std::to_string(shot.room) + " 号房间" + (ans ? "（" + ans->name + "）" : "");
+    std::string msg = why + "！答案：" + s.name_zh + " · " + s.label(shot.room) + " 号房间" +
+                      (ans ? "（" + ans->name + "）" : "");
     if (order.empty()) {
         msg += "\n没有人作答。";
     }
     for (size_t i = 0; i < order.size(); ++i) {
         const auto &g = order[i];
+        const auto gs = sides_.find(g.side);
         msg += "\n" + std::to_string(i + 1) + ". " + g.name + "  " + std::to_string(g.score) + " 分 " + tier(g.score) +
-               "（" + g.side + " " + std::to_string(g.room) + "，" + fmt_secs(g.secs) + " 秒）";
+               "（" + (gs != sides_.end() ? gs->second.label(g.room) : g.side) + "，" + fmt_secs(g.secs) + " 秒）";
     }
     std::string img;
     try {
@@ -506,7 +713,7 @@ void celesteguessr::finish_round(const std::string &sc, round_t &r, bot *p, cons
     catch (const std::exception &e) {
         set_global_log(LOG::ERROR, std::string("celesteguessr: reveal: ") + e.what());
     }
-    p->cq_send(msg + (img.empty() ? "" : "[CQ:image,file=file://" + img + ",id=40000]"), conf);
+    p->cq_send(msg + (img.empty() ? "" : image(img)), conf);
     if (!r.guesses.empty()) {
         save_scores(sc, r);
     }
@@ -541,45 +748,26 @@ void celesteguessr::send_rank(const msg_meta &conf)
 
 void celesteguessr::send_map(const msg_meta &conf, const std::string &arg)
 {
-    std::string key = side_key(arg);
-    if (key.empty()) {
-        auto it = rounds_.find(scope(conf));
-        if (arg.empty() && sides_.size() == 1) {
-            key = sides_.begin()->first;
-        }
-        else {
-            std::string keys;
-            for (const auto &kv : sides_) {
-                keys += (keys.empty() ? "" : " ") + kv.first;
-            }
-            conf.p->cq_send("*cg map <章节>，现有：" + keys, conf);
-            (void)it;
-            return;
-        }
-    }
-    auto it = sides_.find(key);
-    if (it == sides_.end()) {
-        conf.p->cq_send("题库里还没有 " + key, conf);
+    std::string side;
+    int part = 0;
+    if (!parse_place(arg, side, part)) {
+        conf.p->cq_send("*cg map <章节>，如 *cg map 1A、*cg map 7A-3；现有：" + keys_text(), conf);
         return;
     }
-    conf.p->cq_send(it->second.key + " " + it->second.name_zh + "（" + std::to_string(it->second.rooms.size()) +
-                        " 个房间）[CQ:image,file=file://" + it->second.overview + ",id=40000]",
-                    conf);
-}
-
-void celesteguessr::react(const msg_meta &conf, const std::string &emoji, const std::string &fallback) const
-{
-    bool ok = false;
-    try {
-        Json::Value J;
-        J["message_id"] = conf.message_id;
-        J["emoji_id"] = emoji;
-        ok = string_to_json(conf.p->cq_send("set_msg_emoji_like", J))["status"].asString() == "ok";
+    auto it = sides_.find(side);
+    if (it == sides_.end()) {
+        conf.p->cq_send("题库里还没有 " + side, conf);
+        return;
     }
-    catch (...) {
+    if (part > static_cast<int>(it->second.maps.size())) {
+        conf.p->cq_send(side + " 只有 " + std::to_string(it->second.maps.size()) + " 段", conf);
+        return;
     }
-    if (!ok && !fallback.empty()) {
-        conf.p->cq_send("[CQ:reply,id=" + std::to_string(conf.message_id) + "]" + fallback, conf);
+    if (part == 0 || it->second.maps.size() == 1) {
+        send_side_maps(conf, it->second, nullptr);
+    }
+    else {
+        send_part_map(conf, it->second, part, nullptr);
     }
 }
 
@@ -587,14 +775,17 @@ static std::string help_text()
 {
     return "CelesteGuessr：一张截图，猜它在蔚蓝的哪个房间\n"
            "*cg：开始一轮（*cg 开始 60 = 限时 60 秒）\n"
-           "*cg 1A：选章节，发这一章的地图（选完还能换）\n"
-           "*cg 19：按地图上的号码猜房间（每人一次）；一步到位：*cg 1A 19\n"
+           "*cg 1A：选章节，发这一章的地图（选完还能换）；大章节按存档点分段，会把各段折叠发出\n"
+           "*cg 7A-3 或选完章节后 *cg 3：只看第 3 段\n"
+           "*cg 19：按地图上的号码猜房间（每人一次）；一步到位：*cg 1A 19 · *cg 7A-3 5\n"
            "*cg check：看谁猜了、还剩多久\n"
-           "*cg map 1A：随时看某章地图 · *cg 结束：提前揭晓（发起人或管理）· *cg 排行：本群总分\n"
+           "*cg map 1A / 7A-3：随时看地图 · *cg 结束：提前揭晓（发起人或管理）· *cg 排行：本群总分\n"
            "计分：正中 5000；同一面越远越少（隔壁约 3500，两屏外约 1650，最少 300）；同章节另一面 100；别的章节 0。"
            "时间到、或选了章节的人都猜完 10 秒后揭晓。\n"
-           "章节：0 序幕，1A-7C，E 尾声，8A-8C 核心，9 再见（选了章节后纯数字是房间号；换到再见用 *cg fw）";
+           "章节：0 序幕，1A-7C，E 尾声，8A-8C 核心，9 再见（选了章节后纯数字是段号/房间号；换到再见用 *cg fw）";
 }
+
+// ---- commands ----------------------------------------------------------------------------------------------------
 
 bool celesteguessr::check(std::string message, const msg_meta &conf)
 {
@@ -612,6 +803,9 @@ void celesteguessr::process(std::string message, const msg_meta &conf)
     }
     if (!body.empty() && body[0] == '.') { // *cg.help
         body = body.substr(1);
+    }
+    for (const char *sep : {"#", "/", ",", "，", "号", "房间", "　"}) {
+        body = replace_all(body, sep, " ");
     }
     const std::vector<std::string> t = split_ws(body);
     const std::string cmd = t.empty() ? "" : lower_ascii(t[0]);
@@ -668,7 +862,7 @@ void celesteguessr::process(std::string message, const msg_meta &conf)
         return;
     }
 
-    // a chapter pick or a guess
+    // a chapter, a section or a guess
     if (!active) {
         conf.p->cq_send("现在没有进行中的回合，*cg 开始一轮", conf);
         return;
@@ -680,42 +874,7 @@ void celesteguessr::process(std::string message, const msg_meta &conf)
             return;
         }
     }
-    auto reply = [&](const std::string &s) {
-        conf.p->cq_send("[CQ:reply,id=" + std::to_string(conf.message_id) + "]" + s, conf);
-    };
-    if (t.size() == 1) {
-        const std::string &tok = t[0];
-        auto pk = r.picks.find(conf.user_id);
-        const side_t *picked = pk != r.picks.end() && sides_.count(pk->second) ? &sides_.at(pk->second) : nullptr;
-        // after a pick a bare number is a room ("*cg 9" is room 9, not Farewell: *cg fw switches to Farewell)
-        if (picked != nullptr && (all_digits(tok) || side_key(tok).empty())) {
-            const room_t *rm = all_digits(tok) ? picked->room(std::stoi(tok.substr(0, 6))) : picked->room_named(tok);
-            if (rm != nullptr) {
-                record_guess(conf, r, picked->key, rm->num);
-                return;
-            }
-            if (all_digits(tok)) {
-                reply(picked->key + " 没有 " + tok + " 号房间（1-" + std::to_string(picked->rooms.size()) + "）");
-                return;
-            }
-        }
-        const std::string k = side_key(tok);
-        if (!k.empty()) {
-            pick_chapter(conf, r, k);
-            return;
-        }
-        if (picked == nullptr && all_digits(tok)) {
-            reply("先选章节：*cg 1A，再 *cg " + tok);
-            return;
-        }
-    }
-    std::string side, err;
-    int room = 0;
-    if (!parse_guess(body, side, room, err)) {
-        reply(err);
-        return;
-    }
-    record_guess(conf, r, side, room);
+    handle_answer(conf, r, t);
 }
 
 void celesteguessr::tick(bot *p)
@@ -736,10 +895,10 @@ void celesteguessr::tick(bot *p)
         const bool all_done = all_in && now - r.last_activity >= std::chrono::seconds(10);
         if (r.active && (all_done || now >= r.deadline)) {
             try {
-                finish_round(kv.first, kv.second, p, all_done && now < r.deadline ? "大家都猜完了" : "时间到");
+                finish_round(kv.first, r, p, all_done && now < r.deadline ? "大家都猜完了" : "时间到");
             }
             catch (const std::exception &e) {
-                kv.second.active = false;
+                r.active = false;
                 set_global_log(LOG::ERROR, std::string("celesteguessr: finish: ") + e.what());
             }
         }
@@ -755,6 +914,7 @@ bool celesteguessr::reload(const msg_meta &conf)
 {
     std::lock_guard<std::mutex> lk(mu_);
     config_dir_.clear();
+    rounds_.clear(); // rounds index the sides being reloaded
     sync_dirs(conf.p);
     return !pool_.empty();
 }

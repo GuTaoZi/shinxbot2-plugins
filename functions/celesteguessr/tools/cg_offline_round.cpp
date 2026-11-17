@@ -47,6 +47,13 @@ public:
             return std::string("{\"data\":{\"card\":\"") + (it == cards.end() ? "" : it->second) +
                    "\",\"nickname\":\"nick\"}}";
         }
+        if (end_point.find("forward") != std::string::npos) {
+            std::cout << "  [bot " << end_point << "] " << J["messages"].size() << " nodes\n";
+            for (const auto &n : J["messages"]) {
+                std::cout << "    node: " << messageArr_to_string(n["data"]["content"]) << "\n";
+            }
+            return "{\"status\":\"ok\"}";
+        }
         std::cout << "  [bot " << end_point << "] " << J.toStyledString().substr(0, 80) << "\n";
         return "{\"status\":\"ok\"}";
     }
@@ -74,7 +81,9 @@ int main(int argc, char **argv)
         }
     };
     say(1001, "*cg 开始 60");
-    const auto &r = cg->rounds_.at("g692267627");
+    auto &r = cg->rounds_.at("g692267627");
+    r.side = "1A"; // the script below plays 1A (one section: room numbers along the side)
+    r.shot = cg->sides_.at("1A").shots.size() / 3;
     const auto &s = cg->sides_.at(r.side);
     const int ans = s.shots[r.shot].room;
     const int near = ans > 1 ? ans - 1 : ans + 1;
@@ -90,7 +99,7 @@ int main(int argc, char **argv)
     say(1003, "*cg 1a");                         // the same chapter: "the map is above"
     say(1002, "*cg " + std::to_string(ans));     // bullseye
     say(1003, "*cg 1A " + std::to_string(near)); // the room before or after on the route
-    say(1004, "*cg 2A 5");                       // no data for 2A
+    say(1004, "*cg 5Z 5");                       // not a side
     say(1004, "*cg 1A 30");                      // somewhere else in 1A
     say(1003, "*cg 3");                          // already guessed
     say(1001, "*cg check");
@@ -98,5 +107,42 @@ int main(int argc, char **argv)
     std::this_thread::sleep_for(std::chrono::seconds(11));
     tick(&B);
     say(1001, "*cg 排行");
+
+    // a split side, if the data has one: chapter (folded forward), section, room; and the one-step form
+    std::string big;
+    for (const auto &kv : cg->sides_) {
+        if (kv.second.maps.size() > 1) {
+            big = kv.first;
+            break;
+        }
+    }
+    if (big.empty()) {
+        std::cout << "== no split side in the data\n";
+        return 0;
+    }
+    say(1001, "*cg 开始 60");
+    auto &r2 = cg->rounds_.at("g692267627");
+    r2.side = big; // force the answer onto the split side
+    r2.shot = cg->sides_.at(big).shots.size() / 2;
+    const auto &bs = cg->sides_.at(big);
+    const int bn = bs.shots[r2.shot].room;
+    int bpart = 1, blocal = 1;
+    for (const auto &rm : bs.rooms) {
+        if (rm.num == bn) {
+            bpart = rm.part;
+            blocal = rm.local;
+        }
+    }
+    std::cout << "== answer: " << big << "-" << bpart << " " << blocal << "\n";
+    say(1002, "*cg " + big);                    // every section, folded
+    say(1002, "*cg " + std::to_string(bpart));  // that section alone
+    say(1002, "*cg " + std::to_string(blocal)); // the room: bullseye
+    say(1003, "*cg " + big + "-" + std::to_string(bpart) + " " + std::to_string(blocal == 1 ? 2 : blocal - 1));
+    say(1004, "*cg " + big + " 1");             // section 1 picked, room not yet
+    say(1004, "*cg 99");                        // no such room in section 1
+    std::this_thread::sleep_for(std::chrono::seconds(11));
+    tick(&B); // 1004 has not guessed: no early end
+    say(1001, "*cg check");
+    say(1001, "*cg 结束");
     return 0;
 }

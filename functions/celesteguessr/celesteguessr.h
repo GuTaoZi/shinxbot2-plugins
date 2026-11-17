@@ -9,11 +9,16 @@
 // chapter's wrong side at 100). QQ cannot click a map, so (user: "first guess the chapter, then provide a map, then
 // number"): *cg 1A picks the chapter and the bot posts that chapter's map once per round - drawn like the F6 debug
 // map, each room's number in a corner badge ("most of us just remember the shape of landscape") - then *cg 19
-// guesses the room (or *cg 1A 19 at once). Scoring ("the farther, the lower score ... shrink like exponential, maybe
-// bullseye 3, then close 2 and same chapter 1"): the right room 5000 (正中), another room of the right side
-// 300 + 3700·e^(-d/640 px) by its distance to the spot (很近 at 1500+, else 同一面), the right chapter's other
-// side 100, another chapter 0. A round ends when its time is up, early once everyone who picked a chapter has guessed and 10 s
-// passed quietly, or by *cg 结束; *cg check shows who has guessed. In groups players are named by their group card.
+// guesses the room (or *cg 1A 19 at once). Big chapters are split at checkpoints into sections, numbered within each
+// ("maybe use things like 7A-3 5? and send forward folded messages after chosen a chapter, with each subchapter a
+// image, and if chosen the subchapter initially or not deciding the room, then show just the single subchapter"):
+// *cg 7A posts every section in one folded forward message, *cg 7A-3 (or *cg 3 after *cg 7A) posts that section
+// alone, *cg 5 then guesses its room 5 (or *cg 7A-3 5 at once).
+// Scoring ("the farther, the lower score ... shrink like exponential, maybe bullseye 3, then close 2 and same chapter
+// 1"): the right room 5000 (正中), another room of the right side 300 + 3700·e^(-d/640 px) by its distance to the
+// spot (很近 at 1500+, else 同一面), the right chapter's other side 100, another chapter 0. A round ends when its
+// time is up, early once everyone who picked a chapter has guessed and 10 s passed quietly, or by *cg 结束;
+// *cg check shows who has guessed. In groups players are named by their group card.
 // Data (screenshots, rooms, maps) is built on the PC with the game by tools/cg_build_data.py into
 // resource/celesteguessr/<side>/.
 
@@ -30,9 +35,14 @@
 class celesteguessr : public processable {
 public:
     struct room_t {
-        int num = 0;
+        int num = 0; // along the whole side
         std::string name;
         double x = 0, y = 0, w = 0, h = 0;
+        int part = 1, local = 0; // section, number within it
+    };
+    struct map_t {
+        std::string file;
+        double scale = 1, ox = 0, oy = 0; // picture px = (world - o) * scale
     };
     struct shot_t {
         std::string file;
@@ -40,17 +50,24 @@ public:
         double x = 0, y = 0; // camera centre, world px
     };
     struct side_t {
-        std::string key, name_zh, name_en, dir, overview;
-        double scale = 1, ox = 0, oy = 0; // overview px = (world - o) * scale
+        std::string key, name_zh, name_en, dir;
+        std::vector<map_t> maps; // one per section
         std::vector<room_t> rooms;
         std::vector<shot_t> shots;
         const room_t *room(int num) const;
+        const room_t *room_at(int part, int local) const;
         const room_t *room_named(const std::string &name) const;
+        int part_size(int part) const;
+        std::string label(int num) const; // "7A-3 5" or "1A 19"
+    };
+    struct pick_t {
+        std::string side;
+        int part = 0; // 0 = section not chosen yet (big sides)
     };
     struct guess_t {
         userid_t user = 0;
         std::string name, side;
-        int room = 0;
+        int room = 0; // num
         int score = 0;
         double secs = 0;
     };
@@ -66,8 +83,8 @@ public:
         userid_t user_id = 0;
         groupid_t group_id = 0;
         std::vector<guess_t> guesses;
-        std::map<userid_t, std::string> picks;   // chapter each player picked
-        std::set<std::string> maps_sent;         // chapter maps already posted this round
+        std::map<userid_t, pick_t> picks;
+        std::set<std::string> maps_sent; // "7A" (every section) or "7A-3"
         std::chrono::steady_clock::time_point last_activity;
     };
 
@@ -88,23 +105,28 @@ private:
     bool load_data();
     std::string scope(const msg_meta &conf) const;
     std::string scores_path() const;
+    std::string keys_text() const;
 
     static std::string side_key(std::string s);
-    bool parse_guess(const std::string &body, std::string &side, int &room, std::string &err) const;
+    bool parse_place(const std::string &tok, std::string &side, int &part) const;
     static int score_for(const side_t &answer_side, const shot_t &shot, const std::string &side,
                          const room_t *room);
     static std::string tier(int score);
     static std::string chapter_of(const std::string &side_key);
-    void pick_chapter(const msg_meta &conf, round_t &r, const std::string &side);
-    void record_guess(const msg_meta &conf, round_t &r, const std::string &side, int room);
-    void send_check(const msg_meta &conf);
 
     void start_round(const msg_meta &conf, int seconds);
+    void send_side_maps(const msg_meta &conf, const side_t &s, round_t *r);
+    void send_part_map(const msg_meta &conf, const side_t &s, int part, round_t *r);
+    void pick(const msg_meta &conf, round_t &r, const std::string &side, int part);
+    void record_guess(const msg_meta &conf, round_t &r, const std::string &side, int room);
+    void handle_answer(const msg_meta &conf, round_t &r, const std::vector<std::string> &t);
+    void send_check(const msg_meta &conf);
     void finish_round(const std::string &sc, round_t &r, bot *p, const std::string &why);
     std::string draw_reveal(const std::string &sc, const round_t &r) const;
     void save_scores(const std::string &sc, const round_t &r);
     void send_rank(const msg_meta &conf);
     void send_map(const msg_meta &conf, const std::string &arg);
+    void reply(const msg_meta &conf, const std::string &text) const;
     void react(const msg_meta &conf, const std::string &emoji, const std::string &fallback) const;
     void tick(bot *p);
 
