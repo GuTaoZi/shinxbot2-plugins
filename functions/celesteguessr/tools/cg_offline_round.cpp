@@ -3,7 +3,7 @@
 //
 //   g++ -std=c++17 -include algorithm -o /tmp/cg_round cg_offline_round.cpp -I../../../lib/shinxbot2-api/include \
 //       -I../../../lib/shinxbot2-api/include/meta_func $(Magick++-config --cxxflags --libs) \
-//       -L$HOME/shinxbot2/lib -lutils -ljsoncpp -ldl -Wl,-rpath,$HOME/shinxbot2/lib
+//       -L$HOME/shinxbot2/lib -lutils -ljsoncpp -lzip -lssl -lcrypto -lcurl -lfmt -ldl -Wl,-rpath,$HOME/shinxbot2/lib
 //   /tmp/cg_round <plugin .so> <dir with config/ and resource/celesteguessr/>
 #include "processable.h"
 #include "utils.h"
