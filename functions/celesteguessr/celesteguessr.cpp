@@ -705,7 +705,7 @@ void celesteguessr::send_check(const msg_meta &conf)
             waiting += (waiting.empty() ? "" : "、") + display_name_in_group(conf, kv.first);
         }
     }
-    conf.p->cq_send("CelesteGuessr 进行中（" + difficulty_name(r.zoom) + "），剩 " +
+    conf.p->cq_send("CelesteGuessr 进行中 · " + difficulty_name(r.zoom) + "，剩 " +
                         std::to_string(std::max<long long>(0, left)) + " 秒\n已作答（" +
                         std::to_string(r.guesses.size()) + "）：" + (done.empty() ? "无" : done) +
                         (waiting.empty() ? "" : "\n选了章节还没猜：" + waiting) +
