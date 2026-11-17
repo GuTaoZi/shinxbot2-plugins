@@ -175,6 +175,7 @@ def font(size):
 
 
 MAX_PX = 3000   # a map picture's longer side; bigger chapters are split into checkpoint sections
+PER_ROOM = 8    # screenshots kept per room (7A and Farewell scan 1400-2000; the zip must reach Volcano)
 
 
 def tile_scale(rooms, names):
@@ -311,7 +312,10 @@ def build_side(celeste, exports, stem, side, out, names):
     overview = maps[0]
     shots, skipped = [], 0
     for n in order:
-        for f in sorted(glob.glob(str(scan / n / "*.png"))):
+        files = sorted(glob.glob(str(scan / n / "*.png")))
+        if len(files) > PER_ROOM:   # evenly spread over the room (CelesteGuessr: 6725 shots for 818 rooms)
+            files = [files[round(i * (len(files) - 1) / (PER_ROOM - 1))] for i in range(PER_ROOM)]
+        for f in files:
             parts = Path(f).stem.split(",")
             dx, dy = int(parts[1][3:]), int(parts[2][3:])
             img = Image.open(f).convert("RGB")
@@ -319,7 +323,7 @@ def build_side(celeste, exports, stem, side, out, names):
                 skipped += 1
                 continue
             name = f"{rooms[n]['num']:03d}_{n}_{dx}_{dy}.jpg"
-            img.resize((960, 540), Image.LANCZOS).save(od / "shots" / name, quality=88)
+            img.resize((960, 540), Image.LANCZOS).save(od / "shots" / name, quality=82)
             shots.append({"file": "shots/" + name, "room": rooms[n]["num"], "x": rooms[n]["x"] + dx, "y": rooms[n]["y"] + dy})
     side_name = "" if num in SINGLE_SIDE else f" {side}面"
     data = {
