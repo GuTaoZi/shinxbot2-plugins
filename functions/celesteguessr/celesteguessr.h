@@ -19,6 +19,9 @@
 // spot (很近 at 1500+, else 同一面), the right chapter's other side 100, another chapter 0. A round ends when its
 // time is up, early once everyone who picked a chapter has guessed and 10 s passed quietly, or by *cg 结束;
 // *cg check shows who has guessed. In groups players are named by their group card.
+// Difficulty (user: "add difficulty just like map guess? change the screenshot's size"; guessmap crops 256/128/64):
+// *cg easy|hard|ultra|imp (简单/困难/极难/地狱) shows the whole screen, or a random 1/2, 1/3, 1/4 of it scaled back up
+// with nearest-neighbour; flat crops are re-rolled; distance is measured from the crop's centre.
 // Data (screenshots, rooms, maps) is built on the PC with the game by tools/cg_build_data.py into
 // resource/celesteguessr/<side>/.
 
@@ -86,6 +89,9 @@ public:
         std::map<userid_t, pick_t> picks;
         std::set<std::string> maps_sent; // "7A" (every section) or "7A-3"
         std::chrono::steady_clock::time_point last_activity;
+        int zoom = 1;             // 1 easy (whole screen), 2 hard, 3 ultra, 4 imp: the piece is 1/zoom of the screen
+        double cx = 0, cy = 0;    // centre of the piece shown, world px
+        std::string question;     // the picture sent
     };
 
 private:
@@ -109,12 +115,15 @@ private:
 
     static std::string side_key(std::string s);
     bool parse_place(const std::string &tok, std::string &side, int &part) const;
-    static int score_for(const side_t &answer_side, const shot_t &shot, const std::string &side,
+    static int score_for(const side_t &answer_side, int answer_room, double x, double y, const std::string &side,
                          const room_t *room);
+    static int difficulty(const std::string &word); // 0 if not a difficulty word
+    static std::string difficulty_name(int zoom);
+    void make_question(const std::string &sc, round_t &r) const;
     static std::string tier(int score);
     static std::string chapter_of(const std::string &side_key);
 
-    void start_round(const msg_meta &conf, int seconds);
+    void start_round(const msg_meta &conf, int seconds, int zoom);
     void send_side_maps(const msg_meta &conf, const side_t &s, round_t *r);
     void send_part_map(const msg_meta &conf, const side_t &s, int part, round_t *r);
     void pick(const msg_meta &conf, round_t &r, const std::string &side, int part);

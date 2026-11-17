@@ -3,7 +3,7 @@
 //
 //   g++ -std=c++17 -include algorithm -o /tmp/cg_round cg_offline_round.cpp -I../../../lib/shinxbot2-api/include \
 //       -I../../../lib/shinxbot2-api/include/meta_func $(Magick++-config --cxxflags --libs) \
-//       -L$HOME/shinxbot2/lib -lutils -ljsoncpp -lzip -lssl -lcrypto -lcurl -lfmt -ldl -Wl,-rpath,$HOME/shinxbot2/lib
+//       -L$HOME/shinxbot2/lib -L$HOME/shinxbot2/plugins/lib/functions -lcelesteguessr -lutils -ljsoncpp -lzip -lssl -lcrypto -lcurl -lfmt -ldl -Wl,-rpath,$HOME/shinxbot2/lib:$HOME/shinxbot2/plugins/lib/functions
 //   /tmp/cg_round <plugin .so> <dir with config/ and resource/celesteguessr/>
 #include "processable.h"
 #include "utils.h"
@@ -84,6 +84,7 @@ int main(int argc, char **argv)
     auto &r = cg->rounds_.at("g692267627");
     r.side = "1A"; // the script below plays 1A (one section: room numbers along the side)
     r.shot = cg->sides_.at("1A").shots.size() / 3;
+    cg->make_question("g692267627", r);
     const auto &s = cg->sides_.at(r.side);
     const int ans = s.shots[r.shot].room;
     const int near = ans > 1 ? ans - 1 : ans + 1;
@@ -124,6 +125,7 @@ int main(int argc, char **argv)
     auto &r2 = cg->rounds_.at("g692267627");
     r2.side = big; // force the answer onto the split side
     r2.shot = cg->sides_.at(big).shots.size() / 2;
+    cg->make_question("g692267627", r2);
     const auto &bs = cg->sides_.at(big);
     const int bn = bs.shots[r2.shot].room;
     int bpart = 1, blocal = 1;
@@ -143,6 +145,17 @@ int main(int argc, char **argv)
     std::this_thread::sleep_for(std::chrono::seconds(11));
     tick(&B); // 1004 has not guessed: no early end
     say(1001, "*cg check");
+    say(1001, "*cg 结束");
+
+    // difficulty: a third of the screen, on 1A; the answer room guessed
+    say(1001, "*cg ultra 45");
+    auto &r3 = cg->rounds_.at("g692267627");
+    r3.side = "1A";
+    r3.shot = cg->sides_.at("1A").shots.size() / 2;
+    cg->make_question("g692267627", r3);
+    std::cout << "== ultra question " << r3.question << " centre " << r3.cx << "," << r3.cy << " (shot "
+              << cg->sides_.at("1A").shots[r3.shot].x << "," << cg->sides_.at("1A").shots[r3.shot].y << ")\n";
+    say(1002, "*cg 1A " + std::to_string(cg->sides_.at("1A").shots[r3.shot].room));
     say(1001, "*cg 结束");
     return 0;
 }

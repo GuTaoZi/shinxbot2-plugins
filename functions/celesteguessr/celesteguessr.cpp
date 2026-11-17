@@ -285,7 +285,9 @@ std::string celesteguessr::chapter_of(const std::string &key)
 // close 2 and same chapter 1"): the right room 5000; another room of the right side 300 + 3700·e^(-d/640), d = world
 // px from the spot to that room (a screen is 320 wide: next door ~3500, two screens ~1650, far away 300 - the right
 // chapter always beats a wrong one); the right chapter's other side 100; another chapter 0.
-int celesteguessr::score_for(const side_t &answer_side, const shot_t &shot, const std::string &side, const room_t *room)
+// (x, y): the centre of the piece shown, world px.
+int celesteguessr::score_for(const side_t &answer_side, int answer_room, double x, double y, const std::string &side,
+                             const room_t *room)
 {
     if (side != answer_side.key) {
         return chapter_of(side) == chapter_of(answer_side.key) ? 100 : 0;
@@ -293,12 +295,88 @@ int celesteguessr::score_for(const side_t &answer_side, const shot_t &shot, cons
     if (room == nullptr) {
         return 0;
     }
-    if (room->num == shot.room) {
+    if (room->num == answer_room) {
         return 5000;
     }
-    const double dx = std::max({room->x - shot.x, 0.0, shot.x - (room->x + room->w)});
-    const double dy = std::max({room->y - shot.y, 0.0, shot.y - (room->y + room->h)});
+    const double dx = std::max({room->x - x, 0.0, x - (room->x + room->w)});
+    const double dy = std::max({room->y - y, 0.0, y - (room->y + room->h)});
     return static_cast<int>(std::lround(300.0 + 3700.0 * std::exp(-std::hypot(dx, dy) / 640.0)));
+}
+
+int celesteguessr::difficulty(const std::string &w)
+{
+    static const std::map<std::string, int> words = {
+        {"easy", 1}, {"简单", 1}, {"hard", 2}, {"困难", 2}, {"ultra", 3}, {"极难", 3},
+        {"imp", 4}, {"impossible", 4}, {"地狱", 4},
+    };
+    auto it = words.find(lower_ascii(w));
+    return it == words.end() ? 0 : it->second;
+}
+
+std::string celesteguessr::difficulty_name(int zoom)
+{
+    switch (zoom) {
+    case 2: return "困难（1/2 屏）";
+    case 3: return "极难（1/3 屏）";
+    case 4: return "地狱（1/4 屏）";
+    default: return "简单（整屏）";
+    }
+}
+
+// The question picture: the whole screenshot (easy), or a random 1/zoom of it scaled back up with nearest-neighbour;
+// crops that are almost flat (sky, darkness, a plain wall) are re-rolled, as guessmap does.
+void celesteguessr::make_question(const std::string &sc, round_t &r) const
+{
+    const shot_t &shot = sides_.at(r.side).shots[r.shot];
+    r.cx = shot.x;
+    r.cy = shot.y;
+    r.question = shot.file;
+    if (r.zoom <= 1) {
+        return;
+    }
+    Magick::Image src(shot.file);
+    const int W = static_cast<int>(src.columns()), H = static_cast<int>(src.rows());
+    const int cw = W / r.zoom, ch = H / r.zoom;
+    Magick::Image best;
+    double best_sd = -1;
+    int bx = 0, by = 0;
+    for (int tries = 0; tries < 12; ++tries) {
+        const int x0 = get_random(W - cw + 1), y0 = get_random(H - ch + 1);
+        Magick::Image c = src;
+        c.crop(Magick::Geometry(cw, ch, x0, y0));
+        c.repage();
+        Magick::Image probe = c;
+        probe.sample(Magick::Geometry(32, 18));
+        probe.type(Magick::GrayscaleType);
+        double sum = 0, sum2 = 0;
+        for (int y = 0; y < 18; ++y) {
+            for (int x = 0; x < 32; ++x) {
+                const double v = Magick::ColorGray(probe.pixelColor(x, y)).shade();
+                sum += v;
+                sum2 += v * v;
+            }
+        }
+        const double mean = sum / 576, sd = std::sqrt(std::max(0.0, sum2 / 576 - mean * mean));
+        if (sd > best_sd) {
+            best_sd = sd;
+            best = c;
+            bx = x0;
+            by = y0;
+        }
+        if (sd > 0.08) {
+            break;
+        }
+    }
+    best.filterType(Magick::PointFilter);
+    best.sample(Magick::Geometry(static_cast<size_t>(W), static_cast<size_t>(H)));
+    const fs::path dir = fs::path(resource_dir_) / "celesteguessr_tmp";
+    fs::create_directories(dir);
+    r.question = (dir / (sc + "_question.jpg")).string();
+    best.quality(90);
+    best.write(r.question);
+    // the picture is 3x the game's 320x180 view, centred on the shot's camera
+    r.cx = shot.x - 160 + (bx + cw / 2.0) * 320.0 / W;
+    r.cy = shot.y - 90 + (by + ch / 2.0) * 180.0 / H;
 }
 
 // bullseye / close / the right side / the right chapter's other side / missed
@@ -413,13 +491,13 @@ void celesteguessr::send_part_map(const msg_meta &conf, const side_t &s, int par
 
 // ---- a round -----------------------------------------------------------------------------------------------------
 
-void celesteguessr::start_round(const msg_meta &conf, int seconds)
+void celesteguessr::start_round(const msg_meta &conf, int seconds, int zoom)
 {
     const std::string sc = scope(conf);
     auto &r = rounds_[sc];
     if (r.active) {
         const auto left = std::chrono::duration_cast<std::chrono::seconds>(r.deadline - clock_t_::now()).count();
-        conf.p->cq_send(image(sides_.at(r.side).shots[r.shot].file) + "本轮还在进行，剩 " +
+        conf.p->cq_send(image(r.question) + "本轮还在进行，剩 " +
                             std::to_string(std::max<long long>(0, left)) + " 秒。*cg <章节> 先选章节",
                         conf);
         return;
@@ -452,12 +530,23 @@ void celesteguessr::start_round(const msg_meta &conf, int seconds)
     r.user_id = conf.user_id;
     r.group_id = conf.group_id;
     r.last_activity = r.started;
-    conf.p->cq_send(image(sides_.at(r.side).shots[r.shot].file) +
-                        "CelesteGuessr：这张截图在哪里？\n"
+    r.zoom = std::clamp(zoom, 1, 4);
+    try {
+        make_question(sc, r);
+    }
+    catch (const std::exception &e) { // the whole screenshot then
+        set_global_log(LOG::ERROR, std::string("celesteguessr: crop: ") + e.what());
+        r.zoom = 1;
+        r.question = sides_.at(r.side).shots[r.shot].file;
+        r.cx = sides_.at(r.side).shots[r.shot].x;
+        r.cy = sides_.at(r.side).shots[r.shot].y;
+    }
+    conf.p->cq_send(image(r.question) +
+                        "CelesteGuessr · " + difficulty_name(r.zoom) + "：这张截图在哪里？\n"
                         "① *cg 1A 先选章节（会发这一章的地图；大章节按存档点分段，如 7A-3）\n"
                         "② *cg 19 按地图上的号码猜房间（每人一次）\n"
                         "一步到位：*cg 1A 19 · *cg 7A-3 5 · *cg check 看进度\n"
-                        "限时 " + std::to_string(seconds) + " 秒 · 题库：" + keys_text(),
+                        "限时 " + std::to_string(seconds) + " 秒 · 难度：*cg easy/hard/ultra/imp",
                     conf);
 }
 
@@ -498,7 +587,7 @@ void celesteguessr::record_guess(const msg_meta &conf, round_t &r, const std::st
     g.name = display_name_in_group(conf, conf.user_id);
     g.side = side;
     g.room = room;
-    g.score = score_for(ans, ans.shots[r.shot], side, gs.room(room));
+    g.score = score_for(ans, ans.shots[r.shot].room, r.cx, r.cy, side, gs.room(room));
     g.secs = std::chrono::duration<double>(clock_t_::now() - r.started).count();
     r.guesses.push_back(g);
     r.picks[conf.user_id] = {side, gs.room(room) ? gs.room(room)->part : 1};
@@ -616,7 +705,8 @@ void celesteguessr::send_check(const msg_meta &conf)
             waiting += (waiting.empty() ? "" : "、") + display_name_in_group(conf, kv.first);
         }
     }
-    conf.p->cq_send("CelesteGuessr 进行中，剩 " + std::to_string(std::max<long long>(0, left)) + " 秒\n已作答（" +
+    conf.p->cq_send("CelesteGuessr 进行中（" + difficulty_name(r.zoom) + "），剩 " +
+                        std::to_string(std::max<long long>(0, left)) + " 秒\n已作答（" +
                         std::to_string(r.guesses.size()) + "）：" + (done.empty() ? "无" : done) +
                         (waiting.empty() ? "" : "\n选了章节还没猜：" + waiting) +
                         "\n所有选了章节的人都猜完后 10 秒自动揭晓",
@@ -651,8 +741,10 @@ std::string celesteguessr::draw_reveal(const std::string &sc, const round_t &r) 
         // top-right corner: the room's own number badge is top-left
         badge(img, X(rm->x + rm->w) - 18, Y(rm->y) + 18, 14, Magick::Color("#0090c0"), std::to_string(i + 1));
     }
-    // the answer: the screenshot's view and its centre (a frame only: the room's shape stays visible)
-    const double cx = X(shot.x), cy = Y(shot.y), hw = 160 * m.scale, hh = 90 * m.scale;
+    // the answer: the piece shown and its centre (a frame only: the room's shape stays visible)
+    const double cx = X(r.cx), cy = Y(r.cy), hw = std::max(160.0 / r.zoom * m.scale, 6.0),
+                 hh = std::max(90.0 / r.zoom * m.scale, 4.0);
+    (void)shot;
     img.draw(std::vector<Magick::Drawable>{Magick::DrawableFillColor("none"), Magick::DrawableStrokeColor("#ffd600"),
                                            Magick::DrawableStrokeWidth(5),
                                            Magick::DrawableRectangle(cx - hw, cy - hh, cx + hw, cy + hh)});
@@ -696,7 +788,7 @@ void celesteguessr::finish_round(const std::string &sc, round_t &r, bot *p, cons
         return a.score != b.score ? a.score > b.score : a.secs < b.secs;
     });
     std::string msg = why + "！答案：" + s.name_zh + " · " + s.label(shot.room) + " 号房间" +
-                      (ans ? "（" + ans->name + "）" : "");
+                      (ans ? "（" + ans->name + "）" : "") + " · " + difficulty_name(r.zoom);
     if (order.empty()) {
         msg += "\n没有人作答。";
     }
@@ -775,6 +867,7 @@ static std::string help_text()
 {
     return "CelesteGuessr：一张截图，猜它在蔚蓝的哪个房间\n"
            "*cg：开始一轮（*cg 开始 60 = 限时 60 秒）\n"
+           "难度：*cg easy 整屏 · hard 1/2 屏 · ultra 1/3 屏 · imp 1/4 屏（简单/困难/极难/地狱，可加秒数：*cg hard 60）\n"
            "*cg 1A：选章节，发这一章的地图（选完还能换）；大章节按存档点分段，会把各段折叠发出\n"
            "*cg 7A-3 或选完章节后 *cg 3：只看第 3 段\n"
            "*cg 19：按地图上的号码猜房间（每人一次）；一步到位：*cg 1A 19 · *cg 7A-3 5\n"
@@ -811,12 +904,18 @@ void celesteguessr::process(std::string message, const msg_meta &conf)
     const std::string cmd = t.empty() ? "" : lower_ascii(t[0]);
     const std::string arg = t.size() > 1 ? t[1] : "";
 
-    if (cmd.empty() || cmd == "start" || cmd == "开始" || cmd == "s") {
-        int secs = kDefaultSeconds;
-        if (all_digits(arg)) {
-            secs = std::clamp(std::stoi(arg.substr(0, 4)), kMinSeconds, kMaxSeconds);
+    // start: "*cg", "*cg 开始 60", "*cg hard", "*cg 开始 ultra 90" (seconds and difficulty in any order)
+    if (cmd.empty() || cmd == "start" || cmd == "开始" || cmd == "s" || difficulty(cmd) > 0) {
+        int secs = kDefaultSeconds, zoom = 1;
+        for (size_t i = 0; i < t.size(); ++i) {
+            if (all_digits(t[i])) {
+                secs = std::clamp(std::stoi(t[i]), kMinSeconds, kMaxSeconds);
+            }
+            else if (difficulty(t[i]) > 0) {
+                zoom = difficulty(t[i]);
+            }
         }
-        start_round(conf, secs);
+        start_round(conf, secs, zoom);
         return;
     }
     if (cmd == "help" || cmd == "帮助") {
