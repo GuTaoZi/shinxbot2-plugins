@@ -1,0 +1,298 @@
+"""Builds the celesteguessr plugin's data from ScreenshotTool scans and Celeste's own map files.
+
+History of user requests (2026-11-17, GuTao): a CelesteGuessr-like game (celesteguessr.com: one screenshot from
+anywhere in the game, guess where it is, up to 5000 points) as a bot plugin. QQ has no clicking on a map, so players
+pick the chapter first, get that chapter's map, then answer a room number read off it (user: "first guess the chapter,
+then provide a map, then number"). CelesteGuessr's own map is tile silhouettes, not screenshots, so players must
+recognise a room's shape, not match pictures; here it is drawn like Celeste's F6 debug map, which players know
+(solid white, air dark), with the numbers in small corner badges ("nobody really remember the room number, most of
+us just remember the shape of landscape"). Screenshots come from d-002's ScreenshotTool (MIT) chapter
+scans, with the player hidden and no skin or HUD mods; the scan is started without keyboard focus by a CelesteTAS
+line: `Invoke, SilentScanner.StartScanChapter, Player`.
+
+Rooms are numbered along the chapter: a breadth-first tree over rooms that touch (within 24 px), the route = the tree
+path from the start room to the end room, and a depth-first walk numbers each room's side branches right after it.
+
+Output, per side, in OUT/<key>/ (key: 0, 1A..7C, E, 8A..8C, 9):
+  side.json      key, names, rooms [{num, name, x, y, w, h}], shots [{file, room, x, y}] (camera centre, world px),
+                 overview {file, scale (px per world px), ox, oy (world px at the overview's 0,0)}
+  overview.png   silhouettes + room numbers
+  shots/*.jpg    question pictures, 960x540
+
+Run on the machine with the game and the scans (Windows here), then copy OUT to the bot's
+resource/celesteguessr/ directory:
+  python cg_build_data.py --celeste "C:/Program Files (x86)/Steam/steamapps/common/Celeste" --out cg_data [--only 1A]
+"""
+import argparse
+import glob
+import json
+import math
+import os
+import struct
+from collections import deque
+from pathlib import Path
+
+from PIL import Image, ImageDraw, ImageFont
+
+# map file stem -> (number shown to players, side letters by file suffix)
+CHAPTERS = {
+    "0-Intro": ("0", 0), "1-ForsakenCity": ("1", 1), "2-OldSite": ("2", 2), "3-CelestialResort": ("3", 3),
+    "4-GoldenRidge": ("4", 4), "5-MirrorTemple": ("5", 5), "6-Reflection": ("6", 6), "7-Summit": ("7", 7),
+    "8-Epilogue": ("E", 8), "9-Core": ("8", 9), "LostLevels": ("9", 10),
+}
+SINGLE_SIDE = {"0", "E", "9"}   # chapters with only an A side: key without the letter
+
+
+def read_map(path):
+    """Celeste's .bin map (Monocle BinaryPacker) as {name, attrs, children}."""
+    b, i = Path(path).read_bytes(), [0]
+
+    def u8():
+        i[0] += 1
+        return b[i[0] - 1]
+
+    def fmt(f, n):
+        i[0] += n
+        return struct.unpack_from(f, b, i[0] - n)[0]
+
+    def s():
+        n = shift = 0
+        while True:
+            c = u8()
+            n |= (c & 0x7F) << shift
+            shift += 7
+            if c < 0x80:
+                break
+        i[0] += n
+        return b[i[0] - n:i[0]].decode("utf-8")
+
+    assert s() == "CELESTE MAP"
+    s()
+    table = [s() for _ in range(fmt("<h", 2))]
+
+    def value(t):
+        if t == 0:
+            return bool(u8())
+        if t == 1:
+            return u8()
+        if t == 2:
+            return fmt("<h", 2)
+        if t == 3:
+            return fmt("<i", 4)
+        if t == 4:
+            return fmt("<f", 4)
+        if t == 5:
+            return table[fmt("<h", 2)]
+        if t == 6:
+            return s()
+        if t == 7:
+            n = fmt("<h", 2)
+            raw = b[i[0]:i[0] + n]
+            i[0] += n
+            return "".join(chr(raw[k + 1]) * raw[k] for k in range(0, n, 2))
+        raise ValueError(t)
+
+    def element():
+        name = table[fmt("<h", 2)]
+        attrs = {}
+        for _ in range(u8()):
+            k = table[fmt("<h", 2)]
+            attrs[k] = value(u8())
+        return {"name": name, "attrs": attrs, "children": [element() for _ in range(fmt("<h", 2))]}
+
+    return element()
+
+
+def area_names(celeste):
+    """AREA_n names from the game's own English and Simplified Chinese dialog files."""
+    out = {}
+    for lang in ("English", "Simplified Chinese"):
+        names = {}
+        for line in (Path(celeste) / "Content/Dialog" / f"{lang}.txt").read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("AREA_") and "=" in line:
+                k, v = line.split("=", 1)
+                if k.strip()[5:].isdigit():
+                    names[int(k.strip()[5:])] = v.strip()
+        out[lang] = names
+    return out
+
+
+def touch(a, b, gap=24):
+    ax2, ay2, bx2, by2 = a["x"] + a["w"], a["y"] + a["h"], b["x"] + b["w"], b["y"] + b["h"]
+    h_adj = (0 <= b["x"] - ax2 <= gap or 0 <= a["x"] - bx2 <= gap) and min(ay2, by2) - max(a["y"], b["y"]) > 0
+    v_adj = (0 <= b["y"] - ay2 <= gap or 0 <= a["y"] - by2 <= gap) and min(ax2, bx2) - max(a["x"], b["x"]) > 0
+    return h_adj or v_adj
+
+
+def number_rooms(rooms, start, end=None):
+    key = lambda n: (rooms[n]["x"], -rooms[n]["y"])
+    nbrs = {n: [m for m in rooms if m != n and touch(rooms[n], rooms[m])] for n in rooms}
+    parent, dist, q = {start: None}, {start: 0}, deque([start])
+    while q:
+        r = q.popleft()
+        for m in sorted(nbrs[r], key=key):
+            if m not in dist:
+                dist[m], parent[m] = dist[r] + 1, r
+                q.append(m)
+    end = end if end in dist else max(dist, key=dist.get)
+    route, r = set(), end
+    while r is not None:
+        route.add(r)
+        r = parent[r]
+    children = {n: [] for n in rooms}
+    for m, p in parent.items():
+        if p is not None:
+            children[p].append(m)
+    order = []
+    stack = [start]
+    while stack:   # depth-first, side branches before the route
+        n = stack.pop()
+        order.append(n)
+        stack.extend(sorted(children[n], key=lambda c: (c in route, *key(c)), reverse=True))
+    order += sorted((n for n in rooms if n not in dist), key=key)
+    for i, n in enumerate(order, 1):
+        rooms[n]["num"] = i
+    return order
+
+
+def grid(text, w, h):
+    rows = (text or "").split("\n")
+    return [[(rows[y][x] if y < len(rows) and x < len(rows[y]) else "0") != "0" for x in range(w)] for y in range(h)]
+
+
+def font(size):
+    for f in ("C:/Windows/Fonts/arialbd.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"):
+        if os.path.exists(f):
+            return ImageFont.truetype(f, size)
+    return ImageFont.load_default()
+
+
+def draw_overview(rooms, order, path):
+    """The chapter as Celeste's F6 debug map draws it (2026-11-17, user: players "just remember the shape of
+    landscape", shown the debug map): solid tiles white, air dark, each room's number in a small badge in its top-left
+    corner so it doesn't cover the shape. Players pick the chapter first, get this map, then answer the number."""
+    L = min(r["x"] for r in rooms.values()); T = min(r["y"] for r in rooms.values())
+    R = max(r["x"] + r["w"] for r in rooms.values()); B = max(r["y"] + r["h"] for r in rooms.values())
+    tw, th = (R - L) // 8, (B - T) // 8
+    s = max(1, min(4, int(2400 / max(tw, th))))          # px per tile
+    pad = 24
+    img = Image.new("RGB", (tw * s + 2 * pad, th * s + 2 * pad), (14, 14, 18))
+    px = img.load()
+    for n in order:
+        r = rooms[n]
+        w, h = r["w"] // 8, r["h"] // 8
+        fg = grid(r["solids"], w, h)
+        x0, y0 = pad + (r["x"] - L) // 8 * s, pad + (r["y"] - T) // 8 * s
+        for y in range(h):
+            for x in range(w):
+                c = (236, 236, 236) if fg[y][x] else (36, 40, 48)
+                for dy in range(s):
+                    for dx in range(s):
+                        px[x0 + x * s + dx, y0 + y * s + dy] = c
+    d = ImageDraw.Draw(img, "RGBA")
+    for n in order:
+        r = rooms[n]
+        x0, y0 = pad + (r["x"] - L) / 8 * s, pad + (r["y"] - T) / 8 * s
+        d.rectangle((x0, y0, x0 + r["w"] / 8 * s - 1, y0 + r["h"] / 8 * s - 1), outline=(80, 130, 170), width=2)
+    fs = max(11, min(20, int(s * 5)))
+    f = font(fs)
+    for n in order:
+        r = rooms[n]
+        x0, y0 = pad + (r["x"] - L) / 8 * s, pad + (r["y"] - T) / 8 * s
+        t = str(r["num"])
+        bw, bh = d.textlength(t, font=f) + fs * 0.6, fs * 1.25
+        d.rounded_rectangle((x0 + 3, y0 + 3, x0 + 3 + bw, y0 + 3 + bh), radius=bh / 3, fill=(251, 114, 153, 235))
+        d.text((x0 + 3 + bw / 2, y0 + 3 + bh / 2), t, font=f, fill=(255, 255, 255), anchor="mm")
+    img.save(path)
+    return {"file": "overview.png", "scale": s / 8, "ox": L - pad * 8 / s, "oy": T - pad * 8 / s}
+
+
+def nonsense(img):
+    """Mostly black or flat pictures (a fade, an empty sky) make no question."""
+    g = img.convert("L").resize((160, 90))
+    hist = g.histogram()
+    dark = sum(hist[:24]) / (160 * 90)
+    return dark > 0.9
+
+
+def build_side(celeste, exports, stem, side, out, names):
+    num, area = CHAPTERS[stem]
+    key = num if num in SINGLE_SIDE else num + side
+    suffix = {"A": "", "B": "H", "C": "X"}[side]
+    bin_path = Path(celeste) / "Content/Maps" / f"{stem.replace('-', suffix + '-', 1) if suffix else stem}.bin"
+    if stem == "LostLevels":
+        bin_path = Path(celeste) / "Content/Maps/LostLevels.bin"
+    scan = Path(exports) / "Celeste" / stem / side
+    m = read_map(bin_path)
+    levels = next(c for c in m["children"] if c["name"] == "levels")["children"]
+    scanned = {p.name for p in scan.iterdir() if p.is_dir()} if scan.exists() else set()
+    rooms = {}
+    for lv in levels:
+        a = lv["attrs"]
+        name = a["name"][4:] if a["name"].startswith("lvl_") else a["name"]
+        if scanned and name not in scanned:
+            continue
+        ch = {c["name"]: c for c in lv["children"]}
+        rooms[name] = {"name": name, "x": a["x"], "y": a["y"], "w": a["width"], "h": a["height"],
+                       "solids": ch.get("solids", {"attrs": {}})["attrs"].get("innerText", ""),
+                       "bg": ch.get("bg", {"attrs": {}})["attrs"].get("innerText", "")}
+    start = next(iter(rooms))   # the map's first room is where the chapter starts
+    for lv in levels:
+        n = lv["attrs"]["name"]
+        n = n[4:] if n.startswith("lvl_") else n
+        if n in rooms:
+            start = n
+            break
+    order = number_rooms(rooms, start, "end" if "end" in rooms else None)
+    od = Path(out) / key
+    (od / "shots").mkdir(parents=True, exist_ok=True)
+    overview = draw_overview(rooms, order, od / "overview.png")
+    shots, skipped = [], 0
+    for n in order:
+        for f in sorted(glob.glob(str(scan / n / "*.png"))):
+            parts = Path(f).stem.split(",")
+            dx, dy = int(parts[1][3:]), int(parts[2][3:])
+            img = Image.open(f).convert("RGB")
+            if nonsense(img):
+                skipped += 1
+                continue
+            name = f"{rooms[n]['num']:03d}_{n}_{dx}_{dy}.jpg"
+            img.resize((960, 540), Image.LANCZOS).save(od / "shots" / name, quality=88)
+            shots.append({"file": "shots/" + name, "room": rooms[n]["num"], "x": rooms[n]["x"] + dx, "y": rooms[n]["y"] + dy})
+    side_name = "" if num in SINGLE_SIDE else f" {side}面"
+    data = {
+        "key": key, "sid": f"Celeste/{stem}", "side": side,
+        "name_en": names["English"].get(area, stem) + ("" if num in SINGLE_SIDE else f" {side}-Side"),
+        "name_zh": names["Simplified Chinese"].get(area, stem) + side_name,
+        "overview": overview,
+        "rooms": [{k: rooms[n][k] for k in ("num", "name", "x", "y", "w", "h")} for n in order],
+        "shots": shots,
+    }
+    (od / "side.json").write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"{key}: {len(rooms)} rooms, {len(shots)} shots ({skipped} skipped), overview scale {overview['scale']}")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--celeste", required=True)
+    ap.add_argument("--exports", help="ScreenshotTool's export folder (default <celeste>/ScreenshotTool_Exports)")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--only", nargs="*", help="keys to build, e.g. 1A 2B 9")
+    a = ap.parse_args()
+    exports = a.exports or str(Path(a.celeste) / "ScreenshotTool_Exports")
+    names = area_names(a.celeste)
+    for stem, (num, _) in CHAPTERS.items():
+        for side in "ABC":
+            key = num if num in SINGLE_SIDE else num + side
+            if num in SINGLE_SIDE and side != "A":
+                continue
+            if a.only and key not in a.only:
+                continue
+            if not (Path(exports) / "Celeste" / stem / side).exists():
+                continue
+            build_side(a.celeste, exports, stem, side, a.out, names)
+
+
+if __name__ == "__main__":
+    main()
